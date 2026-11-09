@@ -203,6 +203,66 @@ def main() -> int:
         print("\n== 场景 4：卡片已是地板，再选段 ==")
         again, why = select(result.messages, cfg)
         print("选段:", again, "| 原因:", why)
+
+        # ---- 场景 5：按会话驻留 ----
+        print("\n== 场景 5：驻留视图（每次只压新追加的增量，卡片固化）==")
+        from .session import SessionStore
+
+        store = SessionStore(cfg)
+        calls: list[str] = []
+
+        def counting_llm(prompt: str) -> str:
+            calls.append(prompt)
+            return mock_llm(prompt)
+
+        def anthropic_round(index: int) -> list[dict]:
+            call_id = "call_%d" % index
+            return [
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": _pad(THINKING, 12000)},
+                    {"type": "text", "text": "先查节点。"},
+                    {"type": "tool_use", "id": call_id, "name": "logistics.query",
+                     "input": {"order_id": "A1"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": call_id, "content": CARRIER_BODY},
+                ]},
+            ]
+
+        session = [{"role": "user", "content": [{"type": "text", "text": "帮我看看订单 A1"}]}]
+        views: list[list[dict]] = []
+        for step in range(1, 5):
+            session = session + anthropic_round(step)
+            view, st = store.render(
+                {"system": "你是调度助理", "messages": list(session)}, counting_llm
+            )
+            views.append(view)
+            print("第 %d 次请求：原文 %d 条 -> 发出 %d 条 | 本轮切段=%s | 累计卡片=%d | token ≈ %d -> %d"
+                  % (step, len(session), len(view), st.get("compacted"), st.get("cards"),
+                     st["tokens_before"], st["tokens_after"]))
+
+        append_only = all(views[i + 1][:len(views[i])] == views[i] for i in range(len(views) - 1))
+        # 旧实现每请求都把完整历史重压一遍；这里只算思考字符总量做对比
+        old_chars = 0
+        acc = [{"role": "user", "content": [{"type": "text", "text": "帮我看看订单 A1"}]}]
+        for step in range(1, 5):
+            acc = acc + anthropic_round(step)
+            old_chars += sum(
+                len(block.get("thinking") or "")
+                for message in acc if isinstance(message.get("content"), list)
+                for block in message["content"]
+                if isinstance(block, dict) and block.get("type") == "thinking"
+            )
+        print("摘要调用次数:", len(calls), "| 每次输入字符数:", [len(p) for p in calls])
+        print("旧实现（每请求重压整段）摘要输入合计 ≈ %d 字符，驻留实现 ≈ %d 字符（少 %d%%）"
+              % (old_chars, sum(len(p) for p in calls),
+                 round(100 * (1 - sum(len(p) for p in calls) / max(1, old_chars)))))
+        print("视图严格只追加（已发出的前缀永不回改）:", append_only)
+        _view, again_stats = store.render(
+            {"system": "你是调度助理", "messages": list(session)}, counting_llm
+        )
+        print("同一原文重复发送：本轮切段=%s | 原因=%s | 摘要调用总数=%d"
+              % (again_stats.get("compacted"), again_stats.get("reason"), len(calls)))
     return 0
 
 

@@ -1,0 +1,48 @@
+{
+  "name": "dsh-thinking-compact",
+  "version": "0.1.0",
+  "description": "思考链压缩：把历史推理缩成第一人称摘录卡片，工具调用与结果原文不动 / Reasoning-chain compaction for DeepSeek Harness",
+  "type": "module",
+  "main": "shell.js",
+  "exports": {
+    ".": "./shell.js",
+    "./engine": "./engine.js",
+    "./reasoning": "./reasoning.js"
+  },
+  "files": [
+    "shell.js",
+    "adapter.js",
+    "settings.js",
+    "gate.js",
+    "cooldown.js",
+    "shadow.js",
+    "raw.js",
+    "thunder.js",
+    "plan.js",
+    "engine.js",
+    "reasoning.js",
+    "cordis.patch.yml",
+    "LICENSE",
+    "LICENSE.upstream",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-compaction": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-compaction-basic": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+  },
+  "engines": {
+    "node": "^22.19 || >=24",
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "scripts": {
+    "test": "node --test test"
+  },
+  "license": "MIT"
+}

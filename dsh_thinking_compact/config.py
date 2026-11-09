@@ -31,11 +31,19 @@ class Config:
     shadow_dir: Path = field(default_factory=default_shadow_dir)
     # 代理转发与摘要调用的超时（秒）；缩句输出较长，摘要调用需要更宽的超时
     max_upstream_seconds: float = 300.0
+    # 按会话驻留：只压新追加的增量、卡片生成一次就固化。
+    # 关掉退回旧行为（每个请求都从完整原文重压一遍），只用于对照实验。
+    resident: bool = True
 
     @property
     def usage_path(self) -> Path:
         """usage.jsonl 与 shadow 同父目录：~/.dsh/thinking-compact/usage.jsonl。"""
         return self.shadow_dir.parent / "usage.jsonl"
+
+    @property
+    def sessions_dir(self) -> Path:
+        """会话驻留视图：~/.dsh/thinking-compact/sessions/<fingerprint>.json。"""
+        return self.shadow_dir.parent / "sessions"
 
     @property
     def cuts_path(self) -> Path:

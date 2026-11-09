@@ -33,6 +33,7 @@ from urllib import error, request
 
 from .apply import compact_messages, stats_dict
 from .config import Config
+from .session import SessionStore
 
 CHAT_PATH = "/v1/chat/completions"
 MESSAGES_PATH = "/v1/messages"
@@ -187,6 +188,7 @@ class Handler(BaseHTTPRequestHandler):
     upstream: str
     compact: bool
     stream_timeout: float = 900.0
+    sessions: SessionStore | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[proxy] " + (fmt % args) + "\n")
@@ -241,12 +243,19 @@ class Handler(BaseHTTPRequestHandler):
                     self.upstream, headers, str(payload.get("model") or ""),
                     self.cfg.max_upstream_seconds, messages_route=is_messages,
                 )
-                if is_messages:
+                if is_messages and self.cfg.resident and self.sessions is not None:
+                    # 驻留模式：只压新追加的增量，卡片生成一次就固化，
+                    # 已经发出去的字节一个都不动，前缀缓存能一路续下去。
+                    new_messages, compact_stats = self.sessions.render(payload, llm_call)
+                    if new_messages is not messages:
+                        payload["messages"] = new_messages
+                elif is_messages:
                     from .messages import compact_payload
                     new_messages, stats = compact_payload(
                         payload, cfg=self.cfg, llm_call=llm_call
                     )
                     payload["messages"] = new_messages
+                    compact_stats = stats_dict(stats)
                 else:
                     result = compact_messages(messages, cfg=self.cfg, llm_call=llm_call)
                     if result is not None:
@@ -385,6 +394,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, upstream: str = "https://ap
     cfg = cfg or Config.from_env()
     handler = type("BoundHandler", (Handler,), {
         "cfg": cfg, "upstream": upstream, "compact": compact, "stream_timeout": stream_timeout,
+        "sessions": SessionStore(cfg) if compact and cfg.resident else None,
     })
     server = ThreadingHTTPServer((host, port), handler)
     bound_host, bound_port = server.server_address[:2]
@@ -402,11 +412,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stream-timeout", type=float, default=900.0,
                         help="生成侧单个 socket 读的最大空闲秒数")
     parser.add_argument("--no-compact", action="store_true", help="只转发不压缩（对照用）")
+    parser.add_argument("--no-resident", action="store_true",
+                        help="关掉按会话驻留，退回每请求重压（对照用，成本会明显变差）")
     args = parser.parse_args(argv)
 
-    cfg = Config.from_env()
+    cfg = Config.from_env(resident=not args.no_resident)
     if args.state_dir:
-        cfg = Config.from_env(shadow_dir=Path(args.state_dir) / "shadow")
+        cfg = Config.from_env(resident=not args.no_resident,
+                              shadow_dir=Path(args.state_dir) / "shadow")
     server = serve(args.host, args.port, args.upstream, cfg, compact=not args.no_compact,
                    stream_timeout=args.stream_timeout)
     try:

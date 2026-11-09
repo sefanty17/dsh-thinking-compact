@@ -41,6 +41,25 @@ class MsgSpan:
         return self.reasoning_tokens
 
 
+@dataclass(frozen=True)
+class TailSpan:
+    """增量段内可切的助手轮区间（下标相对增量起点）。"""
+    start: int
+    end: int
+    reasoning_tokens: int
+    segment_tokens: int
+    thinking_text: str
+    rounds: int
+
+    @property
+    def indices(self) -> tuple[int, int]:
+        return self.start, self.end
+
+    @property
+    def cut_reasoning_tokens(self) -> int:
+        return self.reasoning_tokens
+
+
 def _blocks(message: dict) -> list[dict]:
     content = message.get("content")
     if isinstance(content, str):
@@ -179,6 +198,63 @@ def select(messages: list[dict], cfg: Config | None = None) -> tuple[MsgSpan | N
         return None, "segment_too_small"
 
     return MsgSpan(start, end, reasoning_tokens, segment_tokens, thinking), "ok"
+
+
+def select_tail(tail: list[dict], cfg: Config | None = None) -> tuple[TailSpan | None, str]:
+    """在"还没发给过上游"的增量里挑可切轮次。
+
+    和 select() 的区别：不拿最后一个真人 user 消息当边界。增量里的轮次本来就是
+    已经结束的历史，只要助手轮完整（tool_use 全部有对应 tool_result）就能切。
+    遇到真人消息或半截轮次（tool_use 等结果）就断开，绝不跨过去切，
+    否则会把正在进行的这一轮和上面的历史绞在一起。
+
+    返回的下标相对增量起点；调用方自己加上全局偏移。
+    """
+    cfg = cfg or Config.from_env()
+    if not tail:
+        return None, "empty_tail"
+
+    runs: list[list[tuple[int, int]]] = []
+    current: list[tuple[int, int]] = []
+    i = 0
+    while i < len(tail):
+        message = tail[i]
+        if message.get("role") == "assistant":
+            end = _unit_end(tail, i)
+            if end is None:
+                # 半截轮次：它和后面都不再考虑
+                break
+            current.append((i, end))
+            i = end + 1
+            continue
+        # 真人消息或其它角色：把连续段断开，本身不可切
+        if current:
+            runs.append(current)
+            current = []
+        i += 1
+    if current:
+        runs.append(current)
+
+    best: list[tuple[int, int]] | None = None
+    for run in runs:
+        cut = run[: len(run) - cfg.keep_rounds] if cfg.keep_rounds > 0 else run
+        if cut and (best is None or len(cut) > len(best)):
+            best = cut
+    if not best:
+        return None, "recent_tool_rounds_kept" if runs else "no_closed_round"
+
+    start, end = best[0][0], best[-1][1]
+    segment = tail[start:end + 1]
+    thinking = thinking_text(segment)
+    reasoning_tokens = _tokens(thinking)
+    if reasoning_tokens < cfg.min_reasoning_tokens:
+        return None, "reasoning_below_threshold"
+
+    segment_tokens = sum(_tokens(message_text(m)) for m in segment)
+    if segment_tokens < cfg.chunk_min_tokens:
+        return None, "segment_too_small"
+
+    return TailSpan(start, end, reasoning_tokens, segment_tokens, thinking, len(best)), "ok"
 
 
 def _render_tools(segment: list[dict]) -> list[str]:
