@@ -1,0 +1,1965 @@
+Old project `ProviderConfig` has `name` (provider_name), `vision_model`, `vision_same_as_chat`, `vision_base_url`, `vision_api_key`. New schema has `provider_id` but no `provider_name`. The old project's settings UI had a `provider_name` row. So it's a schema gap → report.
+
+Now let me set a todo list and write the files.
+
+Let me carefully write errors.py.
+
+```python
+# -*- coding: utf-8 -*-
+"""infra.llm.errors —— LLM 调用的异常与**可操作的错误归类**。..."""
+from __future__ import annotations
+
+import json
+import socket
+import ssl
+import urllib.error
+from enum import Enum
+
+__all__ = [...]
+```
+
+Error kinds and table.
+
+I want a single table mapping status → (kind, one-liner). Let me write:
+
+```python
+class ErrorKind(str, Enum):
+    CONFIG = "config"
+    AUTH = "auth"
+    FORBIDDEN = "forbidden"  # hmm maybe fold into AUTH
+```
+
+Simplify: kinds = config, auth, not_found, bad_request, rate_limit, server, timeout, cert, network, bad_response, cancelled.
+
+For 403, kind=AUTH is fine (both "密钥无效或没有权限"). But the requirement says classify 401/403 distinctly? "把 HTTP 401/403/404/429/5xx ... 分别识别出来" — the status is recorded anyway (`err.status`), and hints differ slightly. I'll give both kind=AUTH but different hints (401 → 密钥无效; 403 → 没有权限/被限制). Good, and `err.status` distinguishes.
+
+Table:
+
+```python
+_STATUS_TABLE: tuple[tuple[tuple[int, ...], ErrorKind, str], ...] = (
+    ((400, 422), ErrorKind.BAD_REQUEST, "请求被服务端拒绝 —— 多半是模型名或参数不对，检查「模型名」是否是该服务支持的。"),
+    ((401,), ErrorKind.AUTH, "密钥无效或没有权限 —— 到「AI 与对话 → API 密钥」重新粘贴一次。"),
+    ((403,), ErrorKind.AUTH, "密钥没有访问权限（或该模型/地区被限制）—— 换一个有权限的密钥或模型。"),
+    ((404,), ErrorKind.NOT_FOUND, "接口地址可能写错了 —— 检查「接口地址」和进阶项「接口路径」。"),
+    ((408,), ErrorKind.TIMEOUT, "服务端等待超时 —— 稍后重试，或在「生成参数」里调大「请求超时」。"),
+    ((413,), ErrorKind.BAD_REQUEST, "内容太长，超出服务端上限 —— 缩短对话或调小「最长回复」。"),
+    ((429,), ErrorKind.RATE_LIMIT, "额度用尽或请求过快 —— 稍等一会儿再试，并检查账户余额。"),
+)
+```
+
+Plus 5xx handled by range. Write `_status_entry(status)`.
+
+Cert hint constant:
+```
+CERT_HINT = "自签名证书或代理拦截导致 —— 可在「生成参数」里试开关「跳过证书校验」，开着会降低安全性。"
+```
+
+Now `classify_exception`:
+
+```python
+def classify_exception(exc, *, detail="") -> LLMError:
+    if isinstance(exc, LLMError): return exc
+    if isinstance(exc, urllib.error.HTTPError):
+        body = detail or _read_error_body(exc)
+        return from_status(exc.code, body)
+    if isinstance(exc, urllib.error.URLError):
+        return from_reason(exc.reason, detail=detail)
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return LLMError("请求超时", kind=TIMEOUT, hint=...)
+    if isinstance(exc, ssl.SSLError):
+        return LLMError(...CERT)
+    if isinstance(exc, OSError):
+        return from_reason(exc, detail=detail)
+    return LLMError(f"{type(exc).__name__}: {exc}", kind=NETWORK, hint="未知错误……")
+```
+
+`socket.timeout` is alias of `TimeoutError` in 3.10+. `ssl.SSLError` is subclass of OSError; `socket.gaierror` subclass of OSError. `ConnectionResetError` etc. Order matters: check cert before OSError.
+
+`from_reason(reason, detail="")`:
+```python
+def from_reason(reason, *, detail="") -> LLMError:
+    if is_cert_verify_error(reason):
+        return LLMError(f"证书校验失败：{reason}", kind=CERT, hint=CERT_HINT, detail=detail)
+    if isinstance(reason, socket.gaierror):
+        return LLMError(f"域名解析失败：{reason}", kind=NETWORK, hint="域名解析失败 —— 检查「接口地址」拼写和本机网络/DNS。", ...)
+    if isinstance(reason, ConnectionRefusedError):
+        return NETWORK "连不上接口地址 —— 确认地址与端口填对、本地服务（如 Ollama）已启动。"
+    text = str(reason).lower()
+    if "timed out" in text or "timeout" in text: TIMEOUT
+    return NETWORK "网络连接失败 —— 检查网络与代理；如果挂了代理，注意它是否拦截 HTTPS。"
+```
+
+Also `from_status(status, detail)` → builds message: `f"HTTP {status} {reason_phrase}"`? Use http.HTTPStatus to get phrase; simpler: message = f"HTTP {status}: {detail}" if detail else f"HTTP {status}". And `LLMError.__str__` should be informative but one-liner available via `.user_message`.
+
+Design LLMError:
+
+```python
+class LLMError(RuntimeError):
+    def __init__(self, message, *, kind=ErrorKind.NETWORK, status=None, hint="", detail=""):
+        self.kind = ErrorKind(kind) if not isinstance(kind, ErrorKind) else kind
+        self.status = status
+        self.hint = hint
+        self.detail = detail or message
+        super().__init__(f"HTTP {status}: {message}" if status else message)
+
+    @property
+    def user_message(self) -> str:
+        """给用户看的一句话（含下一步动作）。"""
+        return self.hint or str(self)
+
+    def as_dict(self): ...
+```
+
+Also `__reduce__`? RuntimeError with kwargs on copy/pickle - raising exceptions in threads is fine. Keep simple.
+
+Also `ProviderError = LLMError` alias with a comment.
+
+Helper `extract_error_detail(raw)`: parse JSON, look for error.message, error.detail? old: `data['error']['message']`. Add `message` top-level fallback. Fallback: collapse whitespace, truncate 300.
+
+Now sse.py.
+
+```python
+MAX_SSE_BUFFER_BYTES = 1024 * 1024
+
+@dataclass
+class StreamEvent:
+    kind: str
+    data: Any = None
+    finish_reason: str = ""
+    @property
+    def text(self)
+    @property
+    def tool_calls -> list[dict]  # maybe
+```
+
+SSEParser.feed implementation: keep old semantics but factor event splitting to handle multiple line endings. I'll implement splitting on `\n\n` after normalizing `\r\n` → `\n` and `\r` → `\n`? Careful: normalizing the whole buffer each feed is O(n) but fine. However normalizing `\r` alone → `\n` would convert `\r\n` to `\n\n` if not careful. Do: `buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")` then search `b"\n\n"`. That handles CRLF, LF, and CR-only. Good and simpler than old two-marker search. Keep MAX buffer check after appending chunk.
+
+Per-event parse:
+```python
+for line in event.split(b"\n"):
+    if not line or line.startswith(b":"): continue
+    if line.startswith(b"data:"):
+        data.append(line[5:].lstrip().decode("utf-8", "replace"))
+```
+Note: SSE spec says a line "data" with no colon also counts; ignore.
+
+Also `event:`/`id:`/`retry:` lines ignored implicitly (not startswith data:).
+
+Then payload_text = "\n".join(data).strip(); skip empty. `[DONE]` → done event. json parse → LLMError(BAD_RESPONSE) on failure? Old raised ProviderError('Provider 返回了无效 JSON'). Better: raise `LLMError(..., kind=ErrorKind.BAD_RESPONSE, hint="服务端返回的不是合法 SSE 数据 —— 可能接口地址指向了网页而不是 API 端点（常见：路径少了 /v1）或代理注入了内容。")`. That's actionable. Import LLMError from errors.
+
+But wait: some providers send non-JSON keepalive lines... old code raised. Hmm, risky to hard-fail on a junk line. But better to be strict per old behavior. Actually old code raised ProviderError, aborting the stream. I'll keep raising but with actionable hint. Tests use valid JSON.
+
+payload error field: `payload.get("error")` → raise LLMError with detail + kind maybe "bad_response"? Better kind=ErrorKind.SERVER? Use `from_status` unknown. I'll classify as BAD_RESPONSE with hint from message. Actually upstream errors mid-stream: kind=SERVER? I'll use ErrorKind.SERVER with hint "服务端在流中途返回了错误 —— 稍后重试；持续失败检查密钥额度与模型名。" Hmm, if error payload includes code, we could classify by code. Let me handle: if err dict has numeric `code`, classify with from_status(code, msg). Else SERVER kind.
+
+usage: `payload.get("usage")` when dict → `self.usage = payload["usage"]` (last non-empty wins). Some providers only send usage in the final chunk with `stream_options={"include_usage": True}`. Should the client send `stream_options`? Not by default (some providers reject unknown field). Report as open question. Keep parsing only.
+
+Also `_absorb_tool_calls` and `_tool_call_fragment` ported, plus `tool_calls()`.
+
+Add `feed()` handling of `choices[0].delta.reasoning_content`? Old didn't. DeepSeek reasoning models need it to show "thinking". Not required. I could add a `kind="reasoning"` event... Requirement doesn't ask. Keep it out but mention in report? Or include as `delta.get("reasoning_content")` → StreamEvent kind="reasoning". That's extra capability; the delta callback for text should then not include reasoning. Hmm, "增量文本 delta 回调" — main text only. Adding reasoning events is low-cost and useful for reasoning models which the old project cared about (wcllm notes). But it adds API surface. I'll include it: kind="reasoning", and `stream()` yields only delta text (compat). Document it. Also non-stream result captures reasoning_content. This is a merge bonus. Since tests are mine, fine.
+
+Hmm, but "两套实现合并" — wcllm's lesson was reasoning tokens eat the budget. Capturing reasoning_content helps diagnose. Include.
+
+Also finish_reason: some providers give `"length"`. Keep string.
+
+Now client.py.
+
+```python
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Protocol, runtime_checkable
+
+from ..config.settings import Settings  # hmm: importing Settings for typing only
+```
+
+Wait — infra.llm importing infra.config.settings: allowed? infra is the adapter layer; `infra → core` dependency direction stated in infra/__init__. Settings is in infra.config. Same layer — fine.
+
+But should client.py import Settings at module level? For `client_from_settings(settings)` we only need duck typing. I can import under TYPE_CHECKING to avoid a hard dependency and keep the module testable standalone. Better: `from typing import TYPE_CHECKING; if TYPE_CHECKING: from ..config.settings import Settings`. Then annotations `settings: "Settings"`. Since `from __future__ import annotations` is present, string annotations work without quotes anyway — but the name must resolve only if evaluated. With `from __future__ import annotations`, annotations are strings, so TYPE_CHECKING import works. Ruff F rules: unused import under TYPE_CHECKING would be flagged? No — it's used in annotations, ruff understands.
+
+Actually simpler: type the parameter as `Any` with a docstring? No, better typed. I'll use TYPE_CHECKING import.
+
+Also certifi: module-level try/except import as in old code (ruff F401? we use it in function, fine).
+
+Now, `LLMConfig`:
+
+```python
+@dataclass(frozen=True)
+class LLMConfig:
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    chat_path: str = DEFAULT_CHAT_PATH
+    timeout: float = 60.0
+    temperature: float = 0.7
+    max_tokens: int = 2048
+    verify_ssl: bool = True
+    provider_id: str = ""
+    provider_name: str = ""
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
+```
+
+Hmm — "不要在模块里硬编码任何 base_url / model 名". DEFAULT_CHAT_PATH = "/v1/chat/completions" is a path, not a base_url/model; old code had that default too and schema has that default. That's acceptable but to be safe, keep the default in `LLMConfig.chat_path` since schema also defaults to it. Fine. base_url/model default = "" (no hardcoding). 
+
+Wait, `Mapping` in a frozen dataclass field default_factory=dict is fine (hashable not needed).
+
+Methods:
+- `endpoint()` → normalize_chat_endpoint(base_url, chat_path)
+- `problems()` → list[str] of config issues (empty url, url not http, empty model)
+- `with_overrides(**kw)` → dataclasses.replace
+- `from_settings(cls, settings)` classmethod
+- `vision_from_settings(cls, settings)` → LLMConfig | None
+
+Also `_coerce_float/int` safe helpers to avoid crashes when settings.get returns None (Settings always coerces, but a duck-typed settings might not). Use tolerant conversion.
+
+Factory functions:
+```python
+def client_from_settings(settings, *, transport=None, config=None, **overrides) -> LLMClient
+def vision_client_from_settings(settings, *, transport=None) -> LLMClient | None
+```
+
+`client_from_settings(settings, *, transport=None, **overrides)`: build config from settings, apply overrides (validated keys?), return LLMClient(config, transport=transport). Overrides via `replace` — raise TypeError on unknown field (replace does that). But settings overrides may include str values needing coercion; keep simple.
+
+`LLMClient`:
+
+```python
+class LLMClient:
+    def __init__(self, config: LLMConfig, *, transport: Transport | None = None, logger: logging.Logger | None = None, auto_track_usage: bool = True):
+        self.config = config
+        self.transport = transport or UrllibTransport()
+        ...
+        self._parser: SSEParser | None = None
+        self.usage = UsageLedger()
+```
+
+Streams:
+
+```python
+def stream_events(self, messages, *, tools=None, tool_choice="auto", cancel=None,
+                  on_delta=None, response_holder=None, config=None, **overrides) -> Iterator[StreamEvent]
+```
+
+Actually to keep the API tight: `config` override param maybe unnecessary; allow `**overrides` applied via replace for temperature/max_tokens/model per call. That's handy: `client.stream(messages, max_tokens=... )`. But careful: `**overrides` could silently swallow typos. `dataclasses.replace` raises TypeError for unknown fields — good. Implement `_cfg(**overrides)`.
+
+Implementation:
+
+```python
+def stream_events(self, messages, *, tools=None, tool_choice="auto", cancel=None, on_delta=None, response_holder=None, **overrides):
+    cfg = self._effective(overrides)
+    self._require_endpoint(cfg)
+    payload = self._payload(cfg, messages, stream=True, tools=tools, tool_choice=tool_choice)
+    request = self._request(cfg, payload, stream=True)
+    response = self._open(request, cfg)          # raises LLMError
+    if response_holder is not None:
+        try: response_holder.append(response)
+        except Exception: pass
+    parser = SSEParser()
+    self._parser = parser
+    try:
+        while True:
+            if cancel is not None and cancel.is_set(): return
+            chunk = response.read(self.read_size)
+            if not chunk: break
+            for event in parser.feed(chunk):
+                if cancel is not None and cancel.is_set(): return
+                if event.kind == "delta" and on_delta is not None:
+                    on_delta(event.text)
+                yield event
+            if parser.done: break
+    finally:
+        self._close(response)
+        self._track_stream_usage(parser)
+```
+
+Wait: `return` inside try with finally → finally runs; generator closes. Good, no exception.
+
+`self._track_stream_usage(parser)`: if parser.usage: ledger.add(Usage.from_raw(...)) wrapped in try/except.
+
+Hmm — careful with generator + `return` inside a `try/finally` — fine.
+
+`stream()`:
+```python
+def stream(self, messages, *, on_delta=None, cancel=None, **overrides) -> Iterator[str]:
+    """只吐正文分片（旧 `stream()` 的行为）。"""
+    for event in self.stream_events(messages, cancel=cancel, on_delta=on_delta, **overrides):
+        if event.kind == "delta":
+            yield event.text
+```
+But `on_delta` would then be called in stream_events and again? No—stream passes on_delta through to stream_events, called once. Good.
+
+Hmm but requirement 5 says "增量文本 delta 回调" — covered.
+
+`complete()`:
+```python
+def complete(self, messages, *, tools=None, tool_choice="auto", **overrides) -> ChatResult
+```
+Non-stream POST. Parse. Track usage.
+
+`complete_text(messages, **kw) -> str`
+`complete_json(messages=None, *, system=None, user=None, **kw) -> Any | None` — hmm. wcllm had `chat_json(system, user)`. I'll offer two helpers:
+- `complete_json(messages, **kw) -> Any | None` : parse result text with parse_json
+- `chat_json(system, user, **kw)` maybe alias. Keep `complete_json(messages, ...)`; and add convenient `json_messages(system, user)`? Overkill. Provide:
+```python
+def complete_json(self, messages=None, *, system=None, user=None, **overrides) -> Any | None
+```
+If messages is None, build from system/user. Good, covers both call styles.
+
+`test_connection(self, *, config=None) -> tuple[bool, str]`:
+```python
+cfg = self._effective_overrides...
+problems = cfg.problems()
+if problems: return False, "；".join(problems) + " → 到「AI 与对话 → 模型与连接」里填好接口地址和模型名。"
+try:
+    result = self.complete([{"role":"user","content":"ping"}], max_tokens=1, temperature=0.0)  # wait overrides temperature
+    ...return True, f"连接成功（HTTP 200，模型 {cfg.model}）"
+except LLMError as exc:
+    return False, exc.user_message (+ detail?)
+except Exception as exc:
+    return False, ...
+```
+Requirement: detail 是人话. Include HTTP status: `f"连接失败：{exc.user_message}"`. Maybe include status code: `f"连接失败（HTTP {status}）：{hint}"`. I'll format: 
+```python
+head = f"HTTP {exc.status} " if exc.status else ""
+return False, f"{head}{exc.hint or str(exc)}"
+```
+Hmm keep it clean: `f"连接失败（HTTP {status}）：{hint}"` and without status `f"连接失败：{hint}"`.
+
+Also max_tokens=1 with some providers rejects small values? Old used 1. Keep 1. But note: the server may return content "", fine. Also `stream=False`.
+
+Also should test_connection tolerate empty text? Yes: only HTTP success matters. But careful: a naive gateway returning 200 with an HTML page → our json parse raises BAD_RESPONSE → test_connection returns False with hint about endpoint. Good, that's an improvement over old (which just checked HTTP status). 
+
+`last_tool_calls()` / `reset_round_state()` — port, using self._parser. Note in stream_events I set `self._parser = parser` before reading, so after generator completes, last_tool_calls works. But if the caller abandons the generator before it finishes, _parser still references it. Fine.
+
+Caution: `self._parser` mutation makes the client non-reentrant (like old). Document.
+
+Also `_open(request, cfg)`:
+```python
+try:
+    return self.transport.open(request, timeout=cfg.timeout, verify_ssl=cfg.verify_ssl)
+except urllib.error.HTTPError as exc: raise from_status(exc.code, read body) from exc
+except LLMError: raise
+except BaseException as exc: raise classify_exception(exc) from exc
+```
+Careful: `except BaseException` catches KeyboardInterrupt — use `except Exception`. But ssl errors are OSError → Exception. Good. Note HTTPError is a subclass of URLError (and OSError), so order: HTTPError first.
+
+`_read_error_body(exc)`: `exc.read(2048).decode('utf-8','replace')` guarded by try/except.
+
+`_request(cfg, payload, *, stream)`:
+```python
+headers = build_browser_headers({"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json", **cfg.extra_headers})
+if cfg.api_key: headers["Authorization"] = f"Bearer {cfg.api_key}"
+data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+return urllib.request.Request(cfg.endpoint(), data=data, headers=headers, method="POST")
+```
+Note: headers must be a dict; urllib capitalizes as given. Fine.
+
+Note about `extra_headers` merge order: browser defaults < extra_headers < Content-Type/Accept < Authorization. Let me do: base = build_browser_headers(); base.update(extra_headers); base["Content-Type"]=...; base["Accept"]=...; if key: Authorization.
+
+Payload builder:
+```python
+payload = {"model": cfg.model, "messages": list(messages), "stream": stream, "temperature": cfg.temperature, "max_tokens": cfg.max_tokens}
+if tools: payload["tools"]=tools; payload["tool_choice"]=tool_choice or "auto"
+```
+Some providers reject `temperature` for reasoning models; not our problem.
+
+Should we omit temperature if None? Allow `temperature: float | None`; if None skip. Config default 0.7. Keep simple: always include (old did).
+
+Cancel before even opening: if cancel set at entry, return immediately without network. "取消：设置 cancel 事件后流式提前结束且不抛异常" — test will set cancel before iterating OR after first delta. Handle both: check at loop start after open (as coded). But opening a connection with cancel already set is wasteful; add early check before opening? If it's a generator, the body runs on first `next()`. Early check: `if cancel is not None and cancel.is_set(): return` before building request. Good for test "cancel set beforehand → no request sent". I'll add it and assert in test that transport got no request.
+
+Now `ChatResult`:
+
+```python
+@dataclass
+class ChatResult:
+    text: str = ""
+    reasoning: str = ""
+    model: str = ""
+    finish_reason: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    usage: Usage | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def empty(self) -> bool
+```
+
+`Usage`:
+```python
+@dataclass(frozen=True)
+class Usage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+
+    @classmethod
+    def from_raw(cls, raw) -> Usage | None
+    def as_dict(self)
+    def __add__?
+```
+
+Field naming: old used `prompt_cache_hit_tokens` (DeepSeek) and `prompt_tokens_details.cached_tokens` (OpenAI) and `completion_tokens_details.reasoning_tokens`. Support all:
+```python
+prompt = _int(raw.get("prompt_tokens"))
+completion = _int(raw.get("completion_tokens"))
+total = _int(raw.get("total_tokens")) or prompt+completion
+reasoning = _int(details.reasoning_tokens) or _int(raw.get("reasoning_tokens"))
+cached = _int(raw.get("prompt_cache_hit_tokens")) or _int(prompt_details.cached_tokens)
+```
+
+`UsageLedger`:
+```python
+class UsageLedger:
+    def __init__(self): self.calls=0; self.prompt_tokens=0; ... 
+    def add(self, usage: Usage | None) -> None
+    def as_dict(self)
+    def cost(self, *, price_in=0.5, price_out=2.0, price_cache=0.05) -> dict
+    def reset(self)
+```
+cost semantics from old: miss = max(prompt - cached, 0); cost = miss/1e6*price_in + cached/1e6*price_cache + completion/1e6*price_out. Include reasoning in dict but not double-charged. Prices are 元/百万 tokens — defaults from old wcllm (deepseek pricing). Hmm "不要在模块里硬编码任何 base_url / model 名" — prices aren't base_url/model; but they are DeepSeek-specific defaults. To avoid hardcoding DeepSeek pricing, make them required args? `cost(*, price_in, price_out, price_cache=0.0)` — but total_calls... The old cost() had defaults. I'll require price_in and price_out (no defaults) and price_cache default 0.0, documented as 元/百万 token. That avoids baking DeepSeek prices into the module. Report it.
+
+`parse_json(raw)` — as designed.
+
+Now `normalize_chat_endpoint`:
+
+```python
+_VERSIONED = re.compile(r"/v\d+$")
+
+def normalize_chat_endpoint(base_url: str, chat_path: str = DEFAULT_CHAT_PATH) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    path = str(chat_path or DEFAULT_CHAT_PATH).strip()
+    path = path if path.startswith("/") else "/" + path
+    if not base:
+        return path
+    if base.endswith("/chat/completions"):
+        return base
+    if path == DEFAULT_CHAT_PATH and _VERSIONED.search(base):
+        return base + "/chat/completions"
+    return base + path
+```
+Also `base.endswith("/chat/completions")` case: if base = "https://x/v1/chat/completions" → unchanged. Good.
+
+Hmm: `if not base: return path` — old would return path only; endpoint would be relative → urllib error. We validate url in problems() so fine.
+
+Now `_make_ssl_context(verify)`:
+```python
+def make_ssl_context(verify: bool = True):
+    if not verify:
+        return ssl._create_unverified_context()   # noqa: SLF001 not needed (ruff F only)
+    try:
+        if certifi is not None:
+            return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    return ssl.create_default_context()
+```
+Name it `make_ssl_context` public (+ keep `_make_ssl_context` alias? no need). Export `make_ssl_context`.
+
+`UrllibTransport`:
+```python
+class UrllibTransport:
+    """默认传输层：标准库 urllib。测试用假的替换它。"""
+    name = "urllib"
+    def open(self, request, *, timeout, verify_ssl=True):
+        return urllib.request.urlopen(request, timeout=timeout, context=make_ssl_context(verify_ssl))
+```
+
+Transport protocol:
+```python
+@runtime_checkable
+class Transport(Protocol):
+    def open(self, request: urllib.request.Request, *, timeout: float, verify_ssl: bool) -> Any: ...
+```
+Return type Any (response-like). Define a `ResponseLike` Protocol? Keep Any with a comment; simpler and avoids fake needing to conform structurally. Actually typing it helps: 
+
+```python
+class ResponseLike(Protocol):
+    status: int
+    def read(self, size: int = ...) -> bytes: ...
+    def close(self) -> None: ...
+```
+Hmm `status` on Protocol as attribute is fine. I'll include it for documentation; FakeResponse has status/read/close.
+
+Careful: urlopen response for HTTP/1.1 has `.status`. OK.
+
+`read_size` configurable: `LLMClient(..., read_size=4096)`.
+
+Now, since header-building for tests: assert `build_browser_headers` includes UA and Authorization.
+
+Test file `tests/test_llm.py`:
+
+Structure (mirroring test_settings.py: sys.path insert, `_make`, `_tmp_base`, `_Temp`, `_main()` runner). Need the guardrail-like static scan? The requirement mentions referring to those. I'll include `test_suite_never_touches_real_keyring` for this file too (static regex scan for `Settings(` without `secrets=`). Careful about matching my own message text — use a phrasing without the pattern. Note: `_make` function body contains `Settings(path, secrets=InMemorySecretStore())` → contains secrets= → fine.
+
+Do I even need Settings in tests? Yes for factory test: construct Settings with InMemorySecretStore, set values, then `client_from_settings`.
+
+Tests list:
+
+SSE (in sse tests):
+1. `test_sse_single_event`
+2. `test_sse_multiple_events_in_one_chunk`
+3. `test_sse_event_split_across_chunks`
+4. `test_sse_done_marker`
+5. `test_sse_ignores_comments_and_blank_lines`
+6. `test_sse_crlf_and_lf_line_endings`
+7. `test_sse_multiline_data_joined`
+8. `test_sse_reasoning_and_finish_reason` maybe
+9. `test_sse_tool_call_fragments_merged_into_valid_json` (3 shards)
+10. `test_sse_tool_call_missing_index_autoincrements`
+11. `test_sse_buffer_limit`? optional; include (feed > 1MB without separator raises LLMError). Careful about memory/time — 1MB is fine.
+12. `test_sse_invalid_json_raises_classified_error`
+13. `test_sse_usage_captured`
+
+parse_json:
+14. `test_parse_json_plain`
+15. `test_parse_json_fenced`
+16. `test_parse_json_with_surrounding_prose` (text before/after; both array and object)
+17. `test_parse_json_malformed_returns_none` (never raises; multiple malformed inputs)
+18. `test_parse_json_empty_and_none`
+19. `test_parse_json_single_quotes` (literal_eval fallback)
+
+errors:
+20. `test_classify_http_statuses` parametrized-ish loop for 401/403/404/429/500/503 asserting kind and non-empty hint, and status.
+21. `test_classify_timeout`
+22. `test_classify_cert_error`
+23. `test_classify_connection_refused`
+24. `test_classify_dns_error`
+25. `test_error_user_message_non_empty_for_all_kinds` — iterate ErrorKind? Maybe simpler: table-driven.
+26. `test_http_error_detail_extracted_from_json` — extract_error_detail from JSON body with error.message.
+
+client streaming:
+27. `test_stream_deltas_and_callback_and_final_text`
+28. `test_stream_ignores_non_delta_for_text_stream` (stream() returns only text)
+29. `test_stream_cancel_before_start_sends_nothing`
+30. `test_stream_cancel_mid_stream_stops_without_raising`
+31. `test_stream_tool_calls_via_client` (client.last_tool_calls after stream)
+32. `test_stream_raises_classified_error_on_401` (HTTPError from transport)
+33. `test_stream_request_shape` (endpoint/headers/payload: stream true, Authorization, tools)
+
+client non-stream:
+34. `test_complete_returns_text_and_usage`
+35. `test_complete_parses_tool_calls` maybe
+36. `test_complete_raises_on_invalid_json`
+37. `test_complete_json_extracts_from_fenced_reply` (via fake transport returning a fenced JSON)
+
+test_connection:
+38. `test_test_connection_success`
+39. `test_test_connection_failure_401` and 404 maybe; also config-missing path.
+40. `test_test_connection_missing_config_reports_problems`
+
+factory:
+41. `test_client_from_settings_reads_all_fields` (url/model/timeout/temperature/max_tokens/skip_ssl/api_key)
+42. `test_client_from_settings_no_hardcoded_defaults`? e.g. fresh settings defaults → endpoint == schema default. Maybe assert `LLMConfig(base_url="", model="")` has empty defaults (no hardcoded base_url/model). Nice regression guard.
+43. `test_normalize_chat_endpoint_variants`
+44. `test_build_browser_headers_keeps_ua_and_extra`
+45. `test_usage_ledger_cost`
+46. `test_vision_client_from_settings` (vision_same reuse; separate config; disabled → None)
+47. `test_config_problems`
+48. `test_suite_never_touches_real_keyring`
+49. `test_no_real_network_transport_is_default_but_unused`? Skip. Instead guard: a test that asserts tests never import `requests`? Meh. I could add a guard that the fake transport is used everywhere — not needed.
+
+Also `test_llm_module_has_no_sys_path_insert` — nice guard: read the 4 new module files and assert "sys.path.insert" not present. Good given project rule. Cheap and on-theme.
+
+That's a lot but fine. I'll implement with a FakeTransport class:
+
+```python
+class FakeResponse:
+    def __init__(self, chunks, *, status=200):
+        self._chunks = list(chunks); self.status = status; self.closed = False
+    def read(self, size=-1):
+        if not self._chunks: return b""
+        return self._chunks.pop(0)
+    def close(self): self.closed = True
+
+class FakeTransport:
+    """假传输层：记录请求，按脚本返回响应或抛异常。测试绝不发真实网络请求。"""
+    def __init__(self, *, chunks=None, body=None, status=200, error=None):
+        ...
+        self.requests = []
+        self.timeouts = []
+        self.verify_ssl = []
+    def open(self, request, *, timeout, verify_ssl=True):
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        self.verify_ssl.append(verify_ssl)
+        if self._error is not None: raise self._error
+        if self._chunks is not None: return FakeResponse(self._chunks, status=self._status)
+        return FakeResponse([self._body], status=self._status)
+```
+
+For HTTPError, construct: `urllib.error.HTTPError(url, 401, "Unauthorized", hdrs=None, fp=io.BytesIO(b'{"error":{"message":"invalid api key"}}'))`. `hdrs=None` is fine. Note: HTTPError with fp — `read()` works. But `HTTPError.__init__` with hdrs=None: in 3.13 `HTTPError.__init__(self, url, code, msg, hdrs, fp)` sets headers via `self.headers = hdrs`? It does `self.hdrs = hdrs` and `self.headers = hdrs`? Let me recall CPython:
+
+```python
+class HTTPError(URLError, urllib.response.addinfourl):
+    def __init__(self, url, code, msg, hdrs, fp):
+        self.code = code
+        self.msg = msg
+        self.hdrs = hdrs
+        self.fp = fp
+        self.filename = url
+        if fp is not None:
+            self.__super_init(fp, hdrs, url, code)
+```
+addinfourl init with hdrs=None is OK.
+
+Then `exc.read(2048)` → uses fp.read. Good. Also gives `.status`? HTTPError has `.status` property? addinfourl has `.status`; yes `HTTPError.status` exists in modern Python via addinfourl. Not needed.
+
+For cert error: `urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate"))`. `ssl.SSLCertVerificationError` is a subclass of SSLError. In URLError, `.reason`. classify → is_cert_verify_error(str) → contains 'certificate' → CERT. Good.
+
+For timeout: `urllib.error.URLError(socket.timeout("timed out"))` → is_cert false; gaierror no; ConnectionRefused no; text contains "timed out" → TIMEOUT. Also direct `TimeoutError()` → TIMEOUT.
+
+For connection refused: `urllib.error.URLError(ConnectionRefusedError(10061, "connection refused"))` — note ConnectionRefusedError is a subclass of ConnectionError → OSError. Good.
+
+DNS: `socket.gaierror(11001, "getaddrinfo failed")`.
+
+Now for the client's classify path with a raised HTTPError, the error body: `_read_error_body(exc)`.
+
+Let me now write the "real network never used" assurance: FakeTransport always injected in client tests. For `client_from_settings` test, we only check config, no calls. Good.
+
+Also note requirement: "构造设置对象必须注入 InMemorySecretStore" — yes.
+
+One more: requirement 3 says transport injectable; also maybe allow injecting at factory: `client_from_settings(settings, transport=fake)`. Yes, factory accepts transport.
+
+Now, implementation detail for `_effective`:
+```python
+def _effective(self, overrides: Mapping[str, Any]) -> LLMConfig:
+    if not overrides: return self.config
+    return replace(self.config, **overrides)
+```
+
+For messages normalization: accept str content? Keep `list[dict]`. Add helper `text_messages(system, user)`? Not needed; `complete_json(messages=None, system=..., user=...)` builds them.
+
+Payload messages: `list(messages)` copy.
+
+Let me write `_payload`:
+```python
+def _build_payload(self, cfg, messages, *, stream, tools=None, tool_choice="auto") -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": cfg.model,
+        "messages": [dict(m) for m in messages],
+        "stream": bool(stream),
+        "temperature": cfg.temperature,
+        "max_tokens": cfg.max_tokens,
+    }
+    if tools:
+        payload["tools"] = list(tools)
+        payload["tool_choice"] = tool_choice or "auto"
+    return payload
+```
+Hmm `[dict(m) for m in messages]` — if messages contain non-dict it fails; fine.
+
+Also for test_connection, `max_tokens=1` and temperature 0 via overrides.
+
+Now `complete` parsing:
+
+```python
+def complete(self, messages, *, tools=None, tool_choice="auto", **overrides) -> ChatResult:
+    cfg = self._effective(overrides)
+    self._require_ready(cfg)
+    payload = self._build_payload(cfg, messages, stream=False, tools=tools, tool_choice=tool_choice)
+    request = self._build_request(cfg, payload, stream=False)
+    response = self._open(request, cfg)
+    try:
+        raw_bytes = response.read()
+    finally:
+        self._close(response)
+    text = raw_bytes.decode("utf-8", "replace") if isinstance(raw_bytes, (bytes, bytearray)) else str(raw_bytes)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LLMError("Provider 返回了无效 JSON", kind=ErrorKind.BAD_RESPONSE, status=None, hint=..., detail=_short(text)) from exc
+    if not isinstance(data, dict): raise ...
+    if data.get("error"): handle
+    result = self._result_from_payload(data)
+    self._track(result.usage)
+    return result
+```
+
+`_result_from_payload(data)`:
+```python
+choices = data.get("choices") or []
+choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+text = message.get("content") or ""
+reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+tool_calls = normalized from message.get("tool_calls")
+usage = Usage.from_raw(data.get("usage"))
+return ChatResult(text=str(text), reasoning=str(reasoning), model=str(data.get("model") or ""), finish_reason=str(choice.get("finish_reason") or ""), tool_calls=..., usage=usage, raw=data)
+```
+Normalize tool_calls for non-stream: the shape is already complete: `{"id","type","function":{"name","arguments"}}`. Use a normalizer `_normalize_full_tool_calls(raw)` that ensures arguments is a string (json.dumps if dict) and drops nameless entries. Could reuse `_tool_call_fragment` + merge logic: simpler to write a small normalizer:
+
+```python
+def _normalize_tool_calls(raw: Any) -> list[dict]:
+    if not isinstance(raw, list): return []
+    out = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict): continue
+        fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = fn.get("name")
+        if not name: continue
+        args = fn.get("arguments")
+        if args is None: args = ""
+        elif not isinstance(args, str): args = json.dumps(args, ensure_ascii=False)
+        out.append({"id": str(item.get("id") or f"call_{i}"), "type": str(item.get("type") or "function"), "function": {"name": str(name), "arguments": args}})
+    return out
+```
+Put this in sse.py? It's used by client for non-stream. Put in sse.py next to `_tool_call_fragment` as `normalize_tool_calls` and export? sse.py is "SSE 解析" — non-stream tool call normalization is response-shape handling. I'll put it in sse.py as public `normalize_tool_calls` (both are OpenAI response shape utilities) — hmm. Alternatively put in client.py. I'll put it in client.py since it's used there; sse.py keeps the streaming merger. Fine — but `_tool_call_fragment` is in sse.py and exported for reuse? It's private; keep private but export `normalize_tool_calls` from sse.py so both stream/non-stream share one shape authority. Decision: put `normalize_tool_calls` in sse.py (it's about OpenAI response shapes; sse.py is the "protocol shapes" module) and document. Then client imports it. Good: single authority for tool-call shape.
+
+Now the `_require_ready(cfg)`:
+```python
+problems = cfg.problems()
+if problems:
+    raise LLMError("；".join(problems), kind=ErrorKind.CONFIG, hint="到「AI 与对话 → 模型与连接」里填好「接口地址」和「模型名」。")
+```
+Should stream/complete raise on missing model? For a local server, model is required in OpenAI-compatible APIs. Yes raise CONFIG.
+
+Missing api_key: not a problem (local servers). But add to `problems()`? No — it'd block local. Instead mention in docstring/report.
+
+Now write the `StreamEvent` usage & text property:
+```python
+@property
+def text(self) -> str:
+    return self.data if self.kind == "delta" and isinstance(self.data, str) else ""
+```
+
+Now let's write files. I'll be careful with Chinese comments and the project's documentation style (rich docstrings explaining "why"). The project style has heavy explanatory docstrings — match it.
+
+Line length ≤ 120.
+
+Let me write errors.py first.
+
+```python
+# -*- coding: utf-8 -*-
+"""infra.llm.errors —— LLM 调用的异常与**可操作的错误归类**。
+
+═══════════════════════════════════════════════════════════════════════
+  为什么错误要"归类"而不是只抛一条字符串
+═══════════════════════════════════════════════════════════════════════
+旧项目两套 LLM 实现对这个问题的处理是分裂的：
+
+  · `pet/chat/providers.py` 有 `ProviderError(status=...)`，但用户看到的是
+    `HTTP 401: {"error":{"message":"Authentication Fails"}}` —— 还得自己去查 401 是什么；
+  · `00-core/wcllm.py` 只把异常拼成字符串往上一层扔，最后变成 `RuntimeError: LLM 调用失败: ...`；
+  · `app/doctor.py` 里临时写的 `_llm_ping()` 又把 401/403/404/429 的提示**再抄了一遍**。
+
+本项目把"这个错误是什么、用户下一步该做什么"收敛成 `LLMError` 一处：
+  · `kind`   —— 机器可读的归类（给上层决定重试/降级/提示样式）；
+  · `status` —— HTTP 状态码（有就带，没有就是网络层错误）；
+  · `hint`   —— **给用户看的一句话**，必须含下一步动作；
+  · `detail` —— 服务端原文，进日志、进「详情」，不进主提示。
+
+同一件事只允许有一处定义：状态码 → 提示语的映射表就在这里，别处不许再抄。
+"""
+```
+
+Then code. Also mention in docstring the "不要改 doctor.py" — no.
+
+Now the code:
+
+```python
+from __future__ import annotations
+
+import json
+import socket
+import ssl
+import urllib.error
+from enum import Enum
+from typing import Any
+
+__all__ = [
+    "CERT_HINT",
+    "ErrorKind",
+    "LLMError",
+    "ProviderError",
+    "classify",
+    "classify_exception",
+    "extract_error_detail",
+    "from_reason",
+    "from_status",
+    "is_cert_verify_error",
+    "kind_for_status",
+]
+```
+
+`classify` name — maybe `classify_error`. I'll name it `classify(exc)` and export both `classify` and `classify_exception`? Redundant. Let me define:
+- `from_status(status, detail="") -> LLMError`
+- `from_reason(reason, detail="") -> LLMError`
+- `classify_error(exc, detail="") -> LLMError` (idempotent)
+Alias `classify = classify_error`? No aliases; just `classify_error`. Export list accordingly.
+
+Hints as module constants for reuse:
+```python
+TIMEOUT_HINT = "请求超时（等不到响应）—— 网络慢或模型思考太久，可在「生成参数」里调大「请求超时」。"
+CERT_HINT = "自签名证书或代理拦截导致 —— 可在「生成参数」里试开关「跳过证书校验」（开着会降低安全性）。"
+NETWORK_HINT = "网络连接失败 —— 检查网络与代理；如果挂了代理，注意它可能拦截 HTTPS。"
+DNS_HINT = "域名解析失败 —— 检查「接口地址」拼写与本机网络/DNS。"
+REFUSED_HINT = "连不上接口地址 —— 确认地址与端口填对、本地服务（如 Ollama、LM Studio）已启动。"
+BAD_RESPONSE_HINT = "服务端返回的不是合法 JSON —— 多半是「接口地址/接口路径」指向了网页而不是 API 端点（常见：路径少了 /v1）。"
+```
+
+Status entries function:
+```python
+def kind_for_status(status: int) -> ErrorKind:
+    if 500 <= status <= 599: return ErrorKind.SERVER
+    if status in (401,): return ErrorKind.AUTH
+    if status == 403: return ErrorKind.AUTH
+    if status == 404: return ErrorKind.NOT_FOUND
+    if status == 429: return ErrorKind.RATE_LIMIT
+    if status == 408: return ErrorKind.TIMEOUT
+    if 400 <= status <= 499: return ErrorKind.BAD_REQUEST
+    return ErrorKind.BAD_RESPONSE
+```
+
+hint_for_status:
+```python
+def hint_for_status(status: int) -> str:
+    exact = _STATUS_HINTS.get(status)
+    if exact: return exact
+    if 500 <= status <= 599:
+        return f"服务端出错（HTTP {status}）—— 不是你的配置问题，稍后重试；持续失败可换个接口地址或联系服务商。"
+    if 400 <= status <= 499:
+        return f"请求被服务端拒绝（HTTP {status}）—— 检查「模型名」与接口地址是否匹配该服务。"
+    return f"服务端返回了异常状态（HTTP {status}）—— 检查接口地址是否写成了 API 端点。"
+```
+
+_STATUS_HINTS dict:
+```python
+_STATUS_HINTS: dict[int, str] = {
+    400: "请求被服务端拒绝 —— 多半是「模型名」或参数不对，确认模型名是该服务支持的。",
+    401: "密钥无效或没有权限 —— 到「AI 与对话 → API 密钥」里重新粘贴一次。",
+    403: "密钥没有访问权限（或该模型/地区被限制）—— 换一个有权限的密钥或模型。",
+    404: "接口地址可能写错了 —— 检查「接口地址」，以及进阶项「接口路径」是否是 /v1/chat/completions。",
+    408: "服务端等待超时 —— 稍后重试，或在「生成参数」里调大「请求超时」。",
+    413: "内容太长，超出服务端上限 —— 缩短对话，或调小「最长回复」。",
+    422: "请求格式不被服务端接受 —— 检查模型名与参数（有些模型不支持 temperature）。",
+    429: "额度用尽或请求过快 —— 稍等一会儿再试，并检查账户余额。",
+}
+```
+
+extract_error_detail:
+```python
+def extract_error_detail(raw: str | bytes | None, limit: int = 300) -> str:
+    if raw is None: return ""
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    text = text.strip()
+    if not text: return ""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("detail") or err.get("msg")
+            if msg: return _collapse(str(msg), limit)
+        if isinstance(err, str) and err: return _collapse(err, limit)
+        msg = data.get("message") or data.get("detail") or data.get("msg")
+        if msg: return _collapse(str(msg), limit)
+    return _collapse(text, limit)
+```
+`_collapse(text, limit)`: `" ".join(text.split())[:limit]`.
+
+`is_cert_verify_error(reason)`:
+```python
+def is_cert_verify_error(reason: Any) -> bool:
+    if isinstance(reason, ssl.SSLCertVerificationError): return True
+    if isinstance(reason, ssl.SSLError): return True
+    text = str(reason).lower()
+    return any(token in text for token in ("ssl", "certificate", "tls", "cert verify", "self-signed", "self signed"))
+```
+Careful: old checked 'ssl' in text — an SSLError message might be "SSL: CERTIFICATE_VERIFY_FAILED". Also a plain `ssl.SSLError` (e.g. handshake failure) → CERT kind & hint about skipping verification; that's reasonable since the user-facing hint mentions proxy/self-signed. Good.
+
+`from_status`:
+```python
+def from_status(status: int, detail: str = "") -> LLMError:
+    detail_text = extract_error_detail(detail)
+    message = f"HTTP {status}" + (f"：{detail_text}" if detail_text else "")
+    return LLMError(message, kind=kind_for_status(status), status=status, hint=hint_for_status(status), detail=detail_text)
+```
+
+`from_reason`:
+```python
+def from_reason(reason, detail=""):
+    if is_cert_verify_error(reason):
+        return LLMError(f"证书校验失败：{reason}", kind=ErrorKind.CERT, hint=CERT_HINT, detail=str(reason))
+    if isinstance(reason, socket.gaierror):
+        return LLMError(f"域名解析失败：{reason}", kind=ErrorKind.NETWORK, hint=DNS_HINT, detail=str(reason))
+    if isinstance(reason, ConnectionRefusedError):
+        return ... REFUSED_HINT
+    if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
+        return LLMError(f"请求超时：{reason}", kind=TIMEOUT, hint=TIMEOUT_HINT, detail=str(reason))
+    return LLMError(f"网络连接失败：{reason}", kind=NETWORK, hint=NETWORK_HINT, detail=str(reason))
+```
+Note ConnectionResetError → falls to network hint; fine.
+
+`classify_error(exc, detail="")`:
+```python
+def classify_error(exc: BaseException, detail: str = "") -> LLMError:
+    if isinstance(exc, LLMError): return exc
+    if isinstance(exc, urllib.error.HTTPError):
+        return from_status(int(exc.code), detail or read_http_error_body(exc))
+    if isinstance(exc, urllib.error.URLError):
+        return from_reason(exc.reason, detail)
+    if isinstance(exc, ssl.SSLError):
+        return from_reason(exc, detail)
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return from_reason(exc, detail)
+    if isinstance(exc, OSError):
+        return from_reason(exc, detail)
+    return LLMError(f"{type(exc).__name__}: {exc}", kind=ErrorKind.NETWORK, hint=NETWORK_HINT, detail=str(exc))
+```
+Note order: HTTPError before URLError (HTTPError subclasses URLError). dict lookups: `isinstance(exc, socket.timeout)` — in 3.10+ socket.timeout is TimeoutError alias; `(socket.timeout, TimeoutError)` fine.
+
+`read_http_error_body(exc)`:
+```python
+def read_http_error_body(exc: urllib.error.HTTPError, limit: int = 2048) -> str:
+    try:
+        return exc.read(limit).decode("utf-8", "replace")
+    except Exception:
+        return ""
+```
+Careful: after reading, fp is consumed; fine.
+
+Wait: unknown last-resort hint NETWORK_HINT for e.g. json decode error... classify_error is only called for transport-layer exceptions. Fine, but maybe a generic hint is better. Use NETWORK_HINT with message included. OK.
+
+Also `LLMError.__init__` should accept positional message only. And a `cancelled` kind used by client? We don't raise on cancel. Keep the kind defined (unused) or drop it? Unused enum member is harmless; but "不留后门" style suggests no dead stuff. I'll drop CANCELLED unless used... Actually I might use it: if cancel is set before starting, should we raise? No — requirement says no exception. Drop CANCELLED.
+
+Now sse.py.
+
+```python
+# -*- coding: utf-8 -*-
+"""infra.llm.sse —— OpenAI 兼容流式响应的 SSE 解析。
+
+拆出来的唯一理由：**它可以被单独测**。...
+"""
+```
+
+Include `MAX_SSE_BUFFER_BYTES`, `StreamEvent`, `normalize_tool_calls`, `SSEParser`.
+
+Should `StreamEvent` also carry usage? No.
+
+Let me write SSEParser carefully:
+
+```python
+class SSEParser:
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.done = False
+        self.finish_reason = ""
+        self.usage: dict[str, Any] | None = None
+        self._tool_slots: dict[int, dict[str, str]] = {}
+        self._next_index = 0
+
+    def feed(self, chunk: bytes) -> list[StreamEvent]:
+        if chunk:
+            self._buffer += chunk
+        if len(self._buffer) > MAX_SSE_BUFFER_BYTES:
+            raise LLMError("流式响应超过 1 MB 仍未出现事件分隔符", kind=ErrorKind.BAD_RESPONSE, hint="服务端没有按 SSE 格式分包（或接口地址指向了网页）—— 检查「接口路径」，必要时换一个接口地址。")
+        events: list[StreamEvent] = []
+        self._buffer = self._buffer.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        while True:
+            cut = self._buffer.find(b"\n\n")
+            if cut < 0: break
+            raw = self._buffer[:cut]
+            self._buffer = self._buffer[cut + 2:]
+            events.extend(self._parse_block(raw))
+        return events
+```
+
+Hmm: normalizing CR at feed boundaries — an edge case: chunk1 ends with b"\r" and chunk2 starts with b"\n". After feed(chunk1): buffer normalized to "\n" — it becomes a complete separator prematurely → would split an event early. E.g. event "data: {...}" then "\r" then "\n" (CRLF split across chunks): chunk1 = b'data: {..}\r', chunk2 = b'\n\r\n'. After chunk1 normalize: buffer = b'data: {..}\n' → no "\n\n" → fine. After chunk2: buffer = b'data: {..}\n\n\r\n' → normalize → b'data: {..}\n\n\n\n' → first block = b'data: {..}' parsed correctly. 
+
+Risk case: separator `\n\n` where the first `\n` is the LF of CRLF that arrived in the previous chunk and CR arrived... covered. What about a `\r` at end of chunk1 being the start of `\r\n\r\n`: chunk1=b'data: {..}\r', chunk2=b'\n\r\n'. Handled above.
+
+Another risk: `\r` alone inside JSON? No, JSON escapes as \r.
+
+Fine. Alternative: normalize only complete buffer before searching, which is what we do.
+
+`_parse_block(raw: bytes) -> list[StreamEvent]`:
+```python
+data_lines: list[str] = []
+for line in raw.split(b"\n"):
+    if not line or line.startswith(b":"):
+        continue
+    if not line.startswith(b"data:"):
+        continue
+    data_lines.append(line[5:].lstrip().decode("utf-8", "replace"))
+if not data_lines: return []
+payload_text = "\n".join(data_lines).strip()
+if not payload_text: return []
+if payload_text == "[DONE]":
+    self.done = True
+    return [StreamEvent("done", finish_reason=self.finish_reason)]
+try:
+    payload = json.loads(payload_text)
+except json.JSONDecodeError as exc:
+    raise LLMError("流式响应里出现了无效 JSON", kind=ErrorKind.BAD_RESPONSE, hint=BAD_RESPONSE_HINT, detail=_short(payload_text)) from exc
+if not isinstance(payload, dict):
+    return []
+error = payload.get("error")
+if error:
+    raise LLMError(_error_message(error), kind=ErrorKind.SERVER, hint="服务端在流中途返回了错误 —— 检查密钥额度与模型名；稍后重试。", detail=json.dumps(error, ensure_ascii=False))
+usage = payload.get("usage")
+if isinstance(usage, dict) and usage: self.usage = usage
+choice = ...
+```
+Where `_error_message(error)`:
+```python
+def _error_message(error: Any) -> str:
+    if isinstance(error, dict):
+        for key in ("message", "detail", "msg"):
+            if error.get(key): return str(error[key])
+        return json.dumps(error, ensure_ascii=False)
+    return str(error)
+```
+
+Should we classify error payload code via from_status? If `error` dict has `code` int → use `from_status(code, message)`. Nice touch:
+```python
+if isinstance(error, dict):
+    code = error.get("code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        raise from_status(code, _error_message(error))
+```
+Hmm, some providers put code as string "invalid_api_key". Keep: only int codes.
+
+Then choices handling as old, plus reasoning_content.
+
+delta content may be non-str (rare) → str().
+
+Now for `danger`: old code only emitted 'delta' if content truthy. Keep.
+
+Return events in order: delta, reasoning, tool_calls, done.
+
+Now client.py. Let me write everything.
+
+Also needed: `time` import for optional latency? wcllm printed timing in verbose. Skip verbose printing (no GUI, and logging exists). Maybe expose `last_latency`? Skip.
+
+Do I want a `logger`? Use module logger `_log = logging.getLogger(__name__)` and log at debug the request shape (without key!). Avoid logging the key. I'll log endpoint + model at debug.
+
+Now let's write `client.py`:
+
+```python
+# -*- coding: utf-8 -*-
+"""infra.llm.client —— 唯一的 LLM 客户端（流式与非流式共用一套）。..."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import ssl
+import threading
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from .errors import (
+    ErrorKind, LLMError, classify_error, extract_error_detail, from_reason, from_status, is_cert_verify_error,
+)
+from .sse import BAD_RESPONSE_HINT?  # no, BAD_RESPONSE_HINT lives in errors
+from .sse import MAX_SSE_BUFFER_BYTES?, SSEParser, StreamEvent, normalize_tool_calls
+
+if TYPE_CHECKING:
+    from ..config.settings import Settings
+
+try:
+    import certifi
+except Exception:
+    certifi = None
+
+_log = logging.getLogger(__name__)
+
+DEFAULT_CHAT_PATH = "/v1/chat/completions"
+READ_SIZE = 4096
+_VERSIONED_BASE = re.compile(r"/v\d+$")
+```
+
+Careful with import: `is_cert_verify_error` is used? In client we call `classify_error` which handles cert. We don't need `is_cert_verify_error` directly. Don't import unused (ruff F401).
+
+`from_reason`/`from_status` used in `_open`? `_open` uses `classify_error`. So only need `ErrorKind, LLMError, classify_error`. And `extract_error_detail` maybe unused → skip.
+
+Now `Usage`:
+
+```python
+@dataclass(frozen=True)
+class Usage:
+    """一次调用返回的 token 用量。**可选能力**：服务端不给就没有，绝不影响主流程。"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "Usage | None":
+        if not isinstance(raw, dict) or not raw: return None
+        prompt = _as_int(raw.get("prompt_tokens"))
+        completion = _as_int(raw.get("completion_tokens"))
+        total = _as_int(raw.get("total_tokens")) or (prompt + completion)
+        reasoning = _as_int(raw.get("reasoning_tokens"))
+        details = raw.get("completion_tokens_details")
+        if not reasoning and isinstance(details, dict): reasoning = _as_int(details.get("reasoning_tokens"))
+        cached = _as_int(raw.get("prompt_cache_hit_tokens")) or _as_int(raw.get("cache_hit_tokens"))
+        pdetails = raw.get("prompt_tokens_details")
+        if not cached and isinstance(pdetails, dict): cached = _as_int(pdetails.get("cached_tokens"))
+        return cls(prompt, completion, total, reasoning, cached)
+
+    @property
+    def empty(self) -> bool: return not (self.prompt_tokens or self.completion_tokens or self.total_tokens)
+
+    def as_dict(self) -> dict[str, int]: ...
+```
+
+Type annotation `"Usage | None"` with future annotations → fine as `Usage | None`.
+
+`UsageLedger`:
+```python
+class UsageLedger:
+    """跨调用累计用量与成本估算（从旧 wcllm.LLM.cost() 合并来的）。
+
+    刻意**不参与主流程**：usage 缺失就什么都不加，也绝不能因此报错。
+    价格由调用方给：旧实现把 DeepSeek 的单价写死在 cost() 默认参数里，
+    本项目不允许硬编码（换一个 provider 就全是错的）。
+    """
+    def __init__(self) -> None:
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.reasoning_tokens = 0
+        self.cached_tokens = 0
+
+    def add(self, usage: Usage | None) -> None:
+        if usage is None: return
+        self.calls += 1
+        self.prompt_tokens += usage.prompt_tokens
+        ...
+
+    def as_dict(self) -> dict[str, int]
+    def reset(self)
+    def cost(self, *, price_in: float, price_out: float, price_cache: float = 0.0) -> dict[str, Any]:
+        """按「元 / 百万 token」估算累计花费。思考 token 已含在 completion 里，不重复计。"""
+        billed = max(self.prompt_tokens - self.cached_tokens, 0)
+        total = (billed / 1e6 * price_in + self.cached_tokens / 1e6 * price_cache + self.completion_tokens / 1e6 * price_out)
+        return {"calls": ..., "in": ..., "out": ..., "reasoning": ..., "cache_hit": ..., "cost": round(total, 6)}
+```
+
+Note: `calls` increments only when usage present (old incremented when response parsed). Fine; document.
+
+Hmm — should ledger count calls even without usage? For "calls"统计 accuracy, increment calls per completed call regardless. Add `self.calls += 1` in client after a successful call AND in ledger.add only tokens. Let me restructure: `add(usage)` increments calls only if usage is not None... I'll add separate `count_call()` method. Simpler: client calls `self.usage.record(result.usage)` where record increments calls always and tokens when present. Name it `record`:
+
+```python
+def record(self, usage: Usage | None) -> None:
+    self.calls += 1
+    if usage is None: return
+    ...
+```
+And for stream: `self.usage.record(Usage.from_raw(parser.usage))`. Good.
+
+`ChatResult` as designed. `empty` property: `not self.text.strip()`.
+
+Now `Transport` protocol & `UrllibTransport`.
+
+```python
+@runtime_checkable
+class ResponseLike(Protocol):
+    """urllib 响应里客户端真正用到的那几样。测试的假响应照这个形状写。"""
+    def read(self, size: int = ...) -> bytes: ...
+    def close(self) -> None: ...
+```
+Careful with `def read(self, size: int = ...) -> bytes: ...` — using `...` as default in a Protocol is standard.
+
+```python
+@runtime_checkable
+class Transport(Protocol):
+    """传输层。**这是唯一的网络出口**，替换掉它客户端就不再碰网络。"""
+    def open(self, request: urllib.request.Request, *, timeout: float, verify_ssl: bool) -> Any: ...
+```
+
+`UrllibTransport`:
+```python
+class UrllibTransport:
+    name = "urllib"
+    def open(self, request, *, timeout, verify_ssl=True):
+        return urllib.request.urlopen(request, timeout=timeout, context=make_ssl_context(verify_ssl))
+```
+
+`make_ssl_context`:
+```python
+def make_ssl_context(verify: bool = True) -> ssl.SSLContext:
+    """verify=False 跳过证书校验（自签名网关/本地代理）；verify=True 优先用 certifi 的 CA 包…"""
+    if not verify:
+        return ssl._create_unverified_context()
+    try:
+        if certifi is not None:
+            return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _log.debug("certifi CA 包不可用，回退系统默认 CA", exc_info=True)
+    return ssl.create_default_context()
+```
+
+`build_browser_headers(extra=None)` with the old comment about WAF.
+
+`normalize_chat_endpoint` as designed.
+
+`LLMConfig` — with `from_settings`:
+
+```python
+@dataclass(frozen=True)
+class LLMConfig:
+    """一次 LLM 调用的完整参数。**全部来自 Settings，模块里不写死任何地址或模型名。**"""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    chat_path: str = DEFAULT_CHAT_PATH
+    timeout: float = 60.0
+    temperature: float = 0.7
+    max_tokens: int = 2048
+    verify_ssl: bool = True
+    provider_id: str = ""
+    provider_name: str = ""
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
+
+    def endpoint(self) -> str: return normalize_chat_endpoint(self.base_url, self.chat_path)
+
+    def problems(self) -> list[str]:
+        issues = []
+        url = self.base_url.strip()
+        if not url: issues.append("接口地址为空")
+        elif not url.lower().startswith(("http://", "https://")): issues.append(f"接口地址不像 URL（{url}）")
+        if not self.model.strip(): issues.append("模型名为空")
+        if not self.chat_path.strip(): issues.append("接口路径为空")
+        return issues
+
+    def missing_key(self) -> bool: return not self.api_key.strip()
+
+    @classmethod
+    def from_settings(cls, settings: Settings, **overrides: Any) -> LLMConfig: ...
+```
+
+`from_settings`:
+```python
+        config = cls(
+            base_url=_text(settings.get("api_url")),
+            model=_text(settings.get("model")),
+            api_key=_text(settings.secret("api_key")),
+            chat_path=_text(settings.get("chat_path")) or DEFAULT_CHAT_PATH,
+            timeout=_as_float(settings.get("timeout"), 60.0),
+            temperature=_as_float(settings.get("temperature"), 0.7),
+            max_tokens=_as_int(settings.get("max_tokens"), 2048),
+            verify_ssl=not _as_bool(settings.get("skip_ssl")),
+            provider_id=_text(settings.get("provider_id")),
+            provider_name=_text(settings.get("provider_name")),   # ← schema 里暂时没有这个键，取到空串
+        )
+        return replace(config, **overrides) if overrides else config
+```
+Hmm, `settings.secret` might not exist on a duck-typed stub. Guard: 
+```python
+secret = getattr(settings, "secret", None)
+api_key = _text(secret("api_key")) if callable(secret) else ""
+```
+That's defensive; keep it since Settings always has it. I'll use a try/except? Simpler to call directly — Settings is the contract. But fallback is 3 lines and protects duck typing in tests... tests use real Settings. Keep direct call but guard with getattr for robustness:
+
+I'll write a small module helper:
+```python
+def _read_secret(settings: Any, key: str) -> str:
+    getter = getattr(settings, "secret", None)
+    if not callable(getter):
+        return ""
+    try:
+        return _text(getter(key))
+    except Exception:
+        _log.debug("读取密钥 %s 失败", key, exc_info=True)
+        return ""
+```
+Good — "缺失也不能报错" spirit.
+
+`provider_name` — schema lacks it. `settings.get("provider_name")` returns None → "" (no crash). Good; report the gap. Wait, but is including `provider_name` in LLMConfig a hardcode of a nonexistent key? It's harmless and forward-looking; the task explicitly listed provider_name as a key to look for. I'll include it and note it.
+
+`vision_from_settings`:
+```python
+    @classmethod
+    def vision_from_settings(cls, settings) -> "LLMConfig | None":
+        """识屏用的配置。未启用识屏返回 None；「复用对话模型」时直接复用对话配置。"""
+        if not _as_bool(settings.get("vision_enabled")):
+            return None
+        base = cls.from_settings(settings)
+        if _as_bool(settings.get("vision_same")):
+            return base
+        url = _text(settings.get("vision_url")).strip() or base.base_url
+        model = _text(settings.get("vision_model")).strip() or base.model
+        key = _read_secret(settings, "vision_key") or base.api_key
+        return replace(base, base_url=url, model=model, api_key=key)
+```
+
+Then `client_from_settings` and `vision_client_from_settings`.
+
+`LLMClient`:
+
+```python
+class LLMClient:
+    """OpenAI 兼容客户端。**流式与非流式是同一个类的两个入口**，共用一套端点/头/payload/错误归类。
+
+    为什么只留一个类：旧项目里 `pet/chat/providers.py`（桌宠流式）与
+    `00-core/wcllm.py`（洞察非流式）是两套并存的实现 —— 同一个坑（证书、SSE 分片、
+    错误提示）踩两遍，行为还不一致（一个会重试、一个不会；一个带浏览器头、一个不带）。
+    ...
+    """
+
+    def __init__(self, config, *, transport=None, read_size=READ_SIZE, track_usage=True, name="") -> None:
+        self.config = config
+        self.transport = transport if transport is not None else UrllibTransport()
+        self.read_size = int(read_size)
+        self.track_usage = bool(track_usage)
+        self.name = name
+        self.usage = UsageLedger()
+        self._parser: SSEParser | None = None
+```
+
+Methods... let me write out the whole file now. Also cancel type: `threading.Event | None`.
+
+For `stream_events` signature, `messages: Sequence[Mapping[str, Any]]`.
+
+Let me write final code. I'll write files now, then run tests, then iterate.
+
+One more thought on `Iterable`/`Callable` imports: `Iterable` unused maybe → ruff F401. Only import what I use: Callable (on_delta), Iterator, Mapping, Sequence, Any, Protocol, runtime_checkable, TYPE_CHECKING.
+
+`field` from dataclasses used. `replace` used. `threading` used for type only — with future annotations, `threading.Event` in annotation is a string; but I need `threading` imported for... nothing at runtime. Ruff would flag F401 if only used in annotations? Ruff's F401 understands annotation usage (it counts as used). Since annotations are strings due to `from __future__ import annotations`, ruff still resolves names in annotations and counts as used (yes, pyflakes handles string annotations). Safe. But I do use `threading` runtime? `cancel.is_set()` doesn't need the module. I'll keep the import and it counts as used in the annotation.
+
+Let me now write the test file mentally then write code.
+
+Test helpers:
+
+```python
+def _make(path) -> Settings:
+    return Settings(path, secrets=InMemorySecretStore())
+```
+
+`_tmp_base()` same as test_settings.py.
+
+`_Temp` context manager same.
+
+Fake transport:
+
+```python
+class FakeResponse:
+    def __init__(self, chunks, status=200):
+        self._chunks = list(chunks)
+        self.status = status
+        self.closed = False
+        self.read_calls = 0
+    def read(self, size=-1):
+        self.read_calls += 1
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+    def close(self):
+        self.closed = True
+
+class FakeTransport:
+    def __init__(self, *, chunks=None, body=b"", status=200, error=None):
+        self._chunks = chunks
+        self._body = body
+        self._status = status
+        self._error = error
+        self.requests = []
+        self.timeouts = []
+        self.verify_ssl = []
+        self.responses = []
+    def open(self, request, *, timeout, verify_ssl=True):
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        self.verify_ssl.append(verify_ssl)
+        if self._error is not None:
+            raise self._error
+        response = FakeResponse(self._chunks if self._chunks is not None else [self._body], status=self._status)
+        self.responses.append(response)
+        return response
+
+    # 便捷断言
+    @property
+    def last_url(self): return self.requests[-1].full_url
+    @property
+    def last_payload(self): return json.loads(self.requests[-1].data.decode("utf-8"))
+    def last_header(self, name): return self.requests[-1].get_header(name)
+```
+Note: `Request.get_header("Authorization")` — urllib capitalizes header keys as `Authorization` when passed dict? `Request.__init__` does `self.headers = {}` then `for key, value in headers.items(): self.add_header(key, value)`; `add_header` does `self.headers[key.capitalize()] = val`. `key.capitalize()` → "Authorization" becomes "Authorization"? "authorization".capitalize() = "Authorization" — we pass "Authorization" → capitalize() → "Authorization". Good. For "Content-Type".capitalize() = "Content-type"! Because capitalize lowercases the rest. So `get_header("Content-Type")` fails; urllib stores "Content-type". Let me have the helper do `self.requests[-1].get_header(name.capitalize())`? Hmm, for "Content-Type" → "Content-type". get_header does:
+```python
+def get_header(self, header_name, default=None):
+    return self.headers.get(header_name, self.unredirected_hdrs.get(header_name, default))
+```
+No normalization. So use `header_name.capitalize()`. Our add_header path: `Request(url, data=..., headers=dict, method=...)` → in Request.__init__:
+```python
+self.headers = {}
+...
+for key, value in headers.items():
+    self.add_header(key, value)
+```
+add_header: `self.headers[key.capitalize()] = val`. So stored keys are capitalized-first-letter-lowercase-rest. So `get_header("Content-type")` works, `get_header("Authorization")` works ("Authorization".capitalize() == "Authorization"). I'll write a helper that normalizes: 
+```python
+def header(self, name):
+    req = self.requests[-1]
+    for key, value in {**req.headers, **req.unredirected_hdrs}.items():
+        if key.lower() == name.lower(): return value
+    return None
+```
+Cleaner. Note `req.headers` includes "User-agent", etc.
+
+HTTPError factory:
+```python
+def _http_error(status, body=b'{"error":{"message":"boom"}}'):
+    return urllib.error.HTTPError("https://example.invalid/v1/chat/completions", status, "err", None, io.BytesIO(body))
+```
+Careful: `HTTPError.__init__` with hdrs=None → `addinfourl.__init__(fp, headers, url, code)`; `headers=None` → `self.headers = headers`; `.info()` would break but we don't call. Our `read_http_error_body` uses `exc.read(limit)` → `addinfourl.read` → fp.read. Works.
+
+SSE chunk helpers:
+```python
+def _sse(*events) -> bytes:
+    return "".join(f"data: {e}\n\n" for e in events).encode()
+
+def _chunk(payload) -> bytes:
+    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode()
+```
+
+Now the tests. Let me write them concretely and carefully so they pass.
+
+SSE tests:
+
+```python
+def test_sse_single_event():
+    parser = SSEParser()
+    events = parser.feed(_chunk(_delta("你好")))
+    assert [e.kind for e in events] == ["delta"]
+    assert events[0].text == "你好"
+    assert not parser.done
+```
+
+multi events one chunk: `parser.feed(_chunk(_delta("a")) + _chunk(_delta("b")))` → 2 deltas.
+
+across chunks: build one event bytes and split in half:
+```python
+raw = _chunk(_delta("跨块到达"))
+parser.feed(raw[:10]) → []
+parser.feed(raw[10:]) → [delta "跨块到达"]
+```
+Careful: raw[:10] may contain complete? "data: {\"choices\"..." — first 10 bytes `data: {"c` → no "\n\n" → []. Good.
+
+[DONE]: `parser.feed(_chunk(_delta("x")) + b"data: [DONE]\n\n")` → kinds ["delta","done"], parser.done True, event.finish_reason.
+
+comments/blank lines: 
+```python
+raw = b": keepalive\n\ndata: {...}\n\n\n\ndata: [DONE]\n\n"
+```
+Note `\n\n\n\ndata:` → first block is `: keepalive` (comment only → no data → skipped), then block "" (from the double blank) → skipped. Good.
+
+CRLF: `("data: " + json + "\r\n\r\n").encode()` and mixed: also test `\r\n` split across chunks.
+
+multiline data: 
+```python
+raw = b'data: {"choices": [\ndata: {"delta": {"content": "hi"}}]}\n\n'
+```
+This joins to `{"choices": [\n{"delta": {"content": "hi"}}]}` which is valid JSON. Nice test of multi-line data. But careful the joined text: `'{"choices": [' + '\n' + '{"delta": {"content": "hi"}}]}'` → valid. choices[0] = {"delta":{"content":"hi"}} → delta "hi". 
+
+tool calls: build fragments:
+```python
+full_args = json.dumps({"path": "C:/tmp/a.txt", "text": "hello world"}, ensure_ascii=False)
+parts = [full_args[:9], full_args[9:20], full_args[20:]]
+```
+3 shards. Then feed three payloads:
+```python
+def _tool_delta(index, *, id=None, name=None, args=None):
+    fn = {}
+    if name is not None: fn["name"] = name
+    if args is not None: fn["arguments"] = args
+    item = {"index": index, "function": fn}
+    if id is not None: item["id"] = id
+    return {"choices": [{"delta": {"tool_calls": [item]}, "finish_reason": None}]}
+```
+feed: shard1 with id+name+args part ... Then `parser.tool_calls()` → 1 call, id "call_1", name "write_file", `json.loads(arguments)` == dict. Assert `len(parts)==3` sanity and that each partial arg alone is invalid JSON (assert json.loads raises for shards 1&2) — good "真正的分片" check.
+
+missing index autoincrement: feed two tool deltas without index (names a,b) → tool_calls() length 2 in order.
+
+finish_reason + reasoning: payload with delta {"reasoning_content": "想..."} and finish_reason "stop" on the delta chunk; parser.finish_reason == "stop", event kind "reasoning".
+
+usage: payload with usage dict → parser.usage["total_tokens"] == 12.
+
+bad json: `data: {not json}\n\n` → assert raises LLMError with kind BAD_RESPONSE and hint non-empty. Use try/except AssertionError pattern:
+```python
+def _expect_error(fn, kind=None):
+    try:
+        fn()
+    except LLMError as exc:
+        assert exc.hint, "归类错误必须带一句给用户的话"
+        if kind is not None: assert exc.kind == kind, ...
+        return exc
+    raise AssertionError("应该抛 LLMError")
+```
+Helper `_expect_llm_error(fn, kind=None)` used broadly.
+
+buffer limit: `parser.feed(b"x" * (MAX_SSE_BUFFER_BYTES + 1))` → raises LLMError. 1MB alloc is fine.
+
+parse_json tests: straightforward.
+
+errors tests: table-driven:
+```python
+def test_classify_http_statuses():
+    cases = [
+        (401, ErrorKind.AUTH, "密钥"),
+        (403, ErrorKind.AUTH, "权限"),
+        (404, ErrorKind.NOT_FOUND, "地址"),
+        (429, ErrorKind.RATE_LIMIT, "额度"),
+        (500, ErrorKind.SERVER, "服务端"),
+        (503, ErrorKind.SERVER, "服务端"),
+    ]
+    for status, kind, keyword in cases:
+        err = classify_error(_http_error(status))
+        assert err.kind is kind
+        assert err.status == status
+        assert keyword in err.hint
+        assert err.user_message
+```
+Requirement: "401 → '密钥无效或没有权限'". My 401 hint is "密钥无效或没有权限 —— 到…". Good, keyword "密钥无效或没有权限" assert maybe exact substring. Let me assert "密钥无效或没有权限" in hint for 401 exactly, "接口地址可能写错了" for 404, "额度用尽" for 429. Use exact substring per requirement.
+
+Timeout: `classify_error(urllib.error.URLError(socket.timeout("timed out")))` → kind TIMEOUT. Also `classify_error(TimeoutError("timed out"))`.
+Cert: `classify_error(urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate")))` → kind CERT, "跳过证书校验" in hint.
+Conn refused: kind NETWORK, hint non-empty.
+DNS: kind NETWORK.
+Detail extraction: `_http_error(400, b'{"error":{"message":"bad model"}}')` → "bad model" in str(err) and err.detail == "bad model".
+
+client tests:
+
+```python
+def _client(*, transport=None, **config_kwargs):
+    cfg = LLMConfig(base_url="https://api.example.com", model="test-model", api_key="sk-test", **config_kwargs)
+    return LLMClient(cfg, transport=transport or FakeTransport())
+```
+Note: base_url "api.example.com" is a non-network fake domain; nothing connects since fake transport. 
+
+`test_stream_yields_deltas_and_calls_callback`:
+```python
+fake = FakeTransport(chunks=[_chunk(_delta("你")), _chunk(_delta("好")), b"data: [DONE]\n\n"])
+client = _client(transport=fake)
+seen = []
+text = "".join(client.stream([{"role":"user","content":"hi"}], on_delta=seen.append))
+assert text == "你好"
+assert seen == ["你", "好"]
+```
+Careful: chunks are returned one per read() call. After the last chunk read, next read returns b"" → break anyway. Also parser.done triggers break.
+
+`test_stream_events_include_reasoning_and_finish_reason` maybe.
+
+`test_stream_request_shape`: assert `fake.last_url == "https://api.example.com/v1/chat/completions"`, payload stream True, temperature/max_tokens from config, `header("Authorization") == "Bearer sk-test"`, `header("Accept") == "text/event-stream"`, UA contains "Mozilla".
+
+`test_stream_with_tools_sends_native_function_calling`: tools param → payload["tools"] present, tool_choice "auto".
+
+`test_stream_cancel_before_start_sends_no_request`: `cancel = threading.Event(); cancel.set(); list(client.stream(msgs, cancel=cancel)) == []` and `fake.requests == []`.
+
+`test_stream_cancel_mid_stream_stops_cleanly`:
+```python
+chunks = [_chunk(_delta("一")), _chunk(_delta("二")), _chunk(_delta("三"))]
+cancel = threading.Event()
+seen = []
+def on_delta(text):
+    seen.append(text)
+    if len(seen) == 1: cancel.set()
+out = list(client.stream(msgs, cancel=cancel, on_delta=on_delta))
+assert seen == ["一"], ...
+assert out == ["一"]
+```
+Careful: in the loop, after feed(chunk1) we call on_delta("一") which sets cancel, then yield event. Next iteration: `for event in ...` loop check? Our code: for each event in parser.feed(chunk): check cancel at the top → for chunk1 there's just one event, yielded. Then `if parser.done: break` no. Loop continues: `if cancel.is_set(): return` at top of while → returns. Good.
+
+Also assert the response was closed: `fake.responses[0].closed is True` after generator finishes (finally). Since `list()` exhausts → finally ran. Good test of cleanup.
+
+`test_stream_classified_error_on_http_401`:
+```python
+fake = FakeTransport(error=_http_error(401, b'{"error":{"message":"invalid key"}}'))
+client = _client(transport=fake)
+err = _expect_llm_error(lambda: list(client.stream([...])), kind=ErrorKind.AUTH)
+assert "密钥无效" in err.hint
+```
+Note: opening happens inside generator → the error is raised on first next(). `list()` triggers. But `_expect_llm_error` with a lambda calling list → fine.
+
+`test_stream_does_not_raise_network_blocked`? Skip.
+
+`test_client_last_tool_calls_after_stream`: feed tool shards, collect events, then `client.last_tool_calls()` → merged with valid JSON. Also assert `client.reset_round_state()` then `last_tool_calls() == []`.
+
+Non-stream:
+`test_complete_returns_text_and_usage`:
+```python
+body = json.dumps({"model":"test-model","choices":[{"message":{"role":"assistant","content":"你好呀"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"prompt_cache_hit_tokens":4,"completion_tokens_details":{"reasoning_tokens":1}}})
+fake = FakeTransport(body=body.encode())
+result = _client(transport=fake).complete([...])
+assert result.text == "你好呀"
+assert result.finish_reason == "stop"
+assert result.usage.prompt_tokens == 10 ...
+assert payload["stream"] is False
+assert client.usage.as_dict()...
+assert client.usage.cost(price_in=1.0, price_out=2.0, price_cache=0.1)["cost"] == pytest-free comparison
+```
+cost check: billed = 10-4=6; cost = 6/1e6*1 + 4/1e6*0.1 + 3/1e6*2 = 6e-6+0.4e-6+6e-6 = 12.4e-6 → round 6 → 1.24e-05. Assert with tolerance: `abs(c["cost"] - 1.24e-05) < 1e-9`. Let me compute: 6e-06 + 4e-07 + 6e-06 = 1.24e-05. Yes.
+
+`test_complete_tool_calls_normalized`: message.tool_calls with arguments as dict → normalized to str.
+`test_complete_invalid_json_raises_bad_response`.
+`test_complete_json_extracts_fenced_json`: body content = "好的，结果如下：\n```json\n{\"a\": 1}\n```\n希望有帮助" → complete_json returns {"a":1}.
+`test_complete_json_accepts_system_user`: call `client.complete_json(system="sys", user="usr")` → assert payload messages == [{"role":"system",...},{"role":"user",...}] and result parsed.
+
+`test_complete_missing_model_raises_config_error`.
+
+test_connection:
+```python
+def test_test_connection_success():
+    body = json.dumps({"choices":[{"message":{"content":"pong"}}]})
+    fake = FakeTransport(body=body.encode())
+    ok, detail = _client(transport=fake).test_connection()
+    assert ok is True
+    assert "成功" in detail
+    assert fake.last_payload["max_tokens"] == 1
+```
+`test_test_connection_401_and_404`: two cases asserting ok False and hint text in detail, plus "HTTP 401" prefix.
+`test_test_connection_missing_config`: `LLMClient(LLMConfig())` with fake transport → ok False, "接口地址" in detail, and no request sent.
+`test_test_connection_never_raises_on_weird_error`: transport error = ValueError("boom") → ok False with non-empty detail (classify_error default). Also transport raising RuntimeError.
+
+factory:
+```python
+def test_client_from_settings_reads_fields():
+    with _Temp() as path:
+        st = _make(path).load()
+        st.set("api_url", "https://llm.example.com/v4")
+        st.set("model", "my-model")
+        st.set("timeout", 42.5)
+        st.set("temperature", 0.25)
+        st.set("max_tokens", 777)
+        st.set("skip_ssl", True)
+        st.set("api_key", "sk-from-settings")
+        fake = FakeTransport()
+        client = client_from_settings(st, transport=fake)
+        cfg = client.config
+        assert cfg.base_url == "https://llm.example.com/v4"
+        assert cfg.model == "my-model"
+        assert cfg.timeout == 42.5
+        assert cfg.temperature == 0.25
+        assert cfg.max_tokens == 777
+        assert cfg.verify_ssl is False
+        assert cfg.api_key == "sk-from-settings"
+        assert client.transport is fake
+        assert cfg.endpoint() == "https://llm.example.com/v4/chat/completions"
+        assert st.secret("api_key") == "sk-from-settings"  # 密钥走凭据存储
+```
+Note `st.set("api_key", ...)` writes to InMemorySecretStore. Good.
+
+Also assert Settings file doesn't contain the key? Already covered in test_settings.
+
+`test_module_never_hardcodes_provider_defaults`:
+```python
+cfg = LLMConfig()
+assert cfg.base_url == "" and cfg.model == ""
+```
+plus scan source text of llm modules for "api.deepseek.com" and "deepseek-chat" and "sys.path.insert":
+```python
+def test_llm_modules_are_clean():
+    for name in ("__init__.py","errors.py","sse.py","client.py"):
+        text = (LLM_DIR / name).read_text(encoding="utf-8")
+        assert "sys.path.insert" not in text
+        assert "api.deepseek.com" not in text
+        assert "deepseek-chat" not in text
+```
+Nice guard (the docstring in the module shouldn't mention them — careful: I must not write "api.deepseek.com" anywhere in the modules! The old comment in normalize_chat_endpoint mentions 智谱 /api/paas/v4 — that's fine, not deepseek.com. But the schema help mentions deepseek; that's not our file. Also I planned to mention in client docstring... avoid.)
+
+Hmm, but "deepseek" alone may appear? I'll avoid mentioning both exact strings in modules. Let me keep the comment as "base 已带版本段（/v1、/v4 等 OpenAI 兼容路径）" — no provider names. Good.
+
+`test_vision_config_reuses_or_overrides`:
+```python
+with _Temp() as path:
+    st = _make(path).load()
+    st.set("api_url", "https://chat.example.com"); st.set("model","chat-m")
+    st.set("api_key", "sk-chat")
+    assert LLMConfig.vision_from_settings(st) is None  # 未启用
+    st.set("vision_enabled", True)
+    same = LLMConfig.vision_from_settings(st)
+    assert same.model == "chat-m" and same.api_key == "sk-chat"
+    st.set("vision_same", False)
+    st.set("vision_url", "https://vision.example.com")
+    st.set("vision_model", "vision-m")
+    st.set("vision_key", "sk-vision")
+    own = LLMConfig.vision_from_settings(st)
+    assert own.base_url == "https://vision.example.com" and own.model == "vision-m" and own.api_key == "sk-vision"
+```
+And `vision_client_from_settings(st)` returns None when disabled, client otherwise.
+
+`test_normalize_chat_endpoint` variants:
+- ("https://x.com", default path) → "https://x.com/v1/chat/completions"
+- ("https://x.com/", ...) → same
+- ("https://x.com/v1", default) → "https://x.com/v1/chat/completions"
+- ("https://x.com/api/paas/v4", default) → ".../v4/chat/completions"
+- ("https://x.com/v1/chat/completions", default) → unchanged
+- ("https://x.com", "chat/completions") → "https://x.com/chat/completions" (path normalized with leading slash)
+- ("https://x.com", "/custom/endpoint") → "https://x.com/custom/endpoint"
+
+`test_build_browser_headers`: UA contains "Mozilla", extra overrides UA.
+
+`test_llm_error_is_provider_error_alias`: `ProviderError is LLMError`.
+
+`test_stream_event_text_property`: maybe covered.
+
+`test_suite_never_touches_real_keyring` static guard.
+
+`test_pytest_collectable`: nothing.
+
+Also the `_main()` runner with sorted globals like test_settings.
+
+One concern: `test_client_from_settings_reads_fields` sets timeout 42.5 — schema FLOAT allows; min 1 max 600 → ok. temperature 0.25 ok. max_tokens 777 ok (max 65536). skip_ssl bool.
+
+Now let me also think about `Settings.load()` on a nonexistent path: report.created True, values = defaults. api_url default "https://api.deepseek.com". If I call `client_from_settings` on fresh defaults inside a test, endpoint = "https://api.deepseek.com/v1/chat/completions". That's fine (no request). I won't assert against hardcoded deepseek strings in my new files... wait, the test file isn't checked by `test_llm_modules_are_clean` (it only scans the llm dir). But a deepseek string in the test file is "hardcoding" in a test assertion — still avoid. I'll set values explicitly instead of relying on defaults where possible.
+
+But `LLMConfig.from_settings(st)` reading default api_url is fine without asserting its value.
+
+Now — important: `Settings.set("api_key", ...)` requires keyring? No: item.is_secret → `self._secrets.set(...)`, InMemory works. Good.
+
+Let's write the code. Start with errors.py.
+
+Also `__init__.py` exports:
+
+```python
+from .client import (
+    DEFAULT_CHAT_PATH, ChatResult, LLMClient, LLMConfig, ResponseLike, Transport, UrllibTransport,
+    Usage, UsageLedger, build_browser_headers, client_from_settings, make_ssl_context,
+    normalize_chat_endpoint, parse_json, vision_client_from_settings,
+)
+from .errors import (CERT_HINT, ErrorKind, LLMError, ProviderError, classify_error, extract_error_detail, from_reason, from_status, is_cert_verify_error)
+from .sse import MAX_SSE_BUFFER_BYTES, SSEParser, StreamEvent, normalize_tool_calls
+
+__all__ = [...]
+```
+
+Now write.
+
+For `parse_json`, implementation:
+
+```python
+def parse_json(raw: Any) -> Any | None:
+    """从模型输出里抠出 JSON。解析不出来返回 None，**绝不抛异常**。
+
+    模型返回 JSON 时经常不老实（旧项目 wcllm.py 的注释原话）：
+      · 包在 ```json 围栏里；
+      · 前面加一句"好的，结果如下："，后面加一句"希望对你有帮助"；
+      · 用单引号（Python 风格的 dict 字面量）。
+    所以这里分四步试：直接解析 → 去围栏 → 从每个 { / [ 位置尝试 raw_decode → literal_eval。
+    """
+    if raw is None: return None
+    text = raw if isinstance(raw, str) else str(raw)
+    text = text.strip()
+    if not text: return None
+    for candidate in (text, _strip_code_fence(text)):
+        if not candidate: continue
+        try:
+            return json.loads(candidate)
+        except (ValueError, TypeError):
+            pass
+    found = _scan_json(text)
+    if found is not _MISSING:
+        return found
+    try:
+        return ast.literal_eval(text)   # 单引号字典
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+```
+Hmm `_MISSING` sentinel to distinguish "parsed to None" from "not found": json could legitimately be `null`. Using a sentinel is cleaner. But `json.loads("null")` → None returned by the first loop (fine, returns None directly which is indistinguishable from failure — acceptable? For a model returning "null", returning None is right anyway). For the scan: `raw_decode` could yield None for "null". Using sentinel then returning None — same result. So I can simplify: `_scan_json` returns `(found, ok)`? Simpler: have `_scan_json` return a sentinel `_NOT_FOUND` and treat `None` result as valid found. Let me implement with sentinel:
+
+```python
+_NOT_FOUND = object()
+
+def _scan_json(text: str) -> Any:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, index)
+        except ValueError:
+            continue
+        return value
+    return _NOT_FOUND
+```
+Then:
+```python
+found = _scan_json(text)
+if found is not _NOT_FOUND:
+    return found
+```
+Good. This handles "说明文字 {json} 说明文字".
+
+`_strip_code_fence`:
+```python
+_FENCE_START = re.compile(r"^```[A-Za-z0-9_-]*\s*")
+_FENCE_END = re.compile(r"\s*```$")
+
+def _strip_code_fence(text: str) -> str:
+    return _FENCE_END.sub("", _FENCE_START.sub("", text)).strip()
+```
+Also handle fence not at very start: e.g. "好的：\n```json\n{...}\n```" → _strip doesn't remove the prefix "好的：\n". Then json.loads fails, then `_scan_json` finds `{...}` → works. Good.
+
+Malformed inputs to test: "", "这不是 JSON", "{'a': 1,}", "[1, 2", "```json\n{不合法}\n```" → for "{'a': 1,}" literal_eval fails (SyntaxError) → None. `_scan_json` on "{'a': 1,}" → raw_decode at 0 raises ValueError → continue → no more { → not found. Then literal_eval fails → None. Good. "[1, 2" → raw_decode fails → literal_eval SyntaxError → None. 
+
+Edge: `text = "null"` → json.loads → None. Fine.
+
+Now `ast` import needed.
+
+Let me now write the files for real.
+
+Also decide `LLMClient.__init__` param `name` used? For logging client name. Include `name: str = ""`.
+
+Let me write `client.py` code fully:
+
+```python
+class LLMClient:
+    def __init__(self, config, *, transport=None, read_size=READ_SIZE, track_usage=True, name=""):
+        ...
+
+    # ── 配置 ──
+    def with_config(self, **overrides) -> "LLMClient":
+        """换一套参数得到新客户端（共享 transport 与用量账本）。"""
+        clone = LLMClient(replace(self.config, **overrides), transport=self.transport, read_size=self.read_size, track_usage=self.track_usage, name=self.name)
+        clone.usage = self.usage
+        return clone
+```
+Is with_config needed? Not required. Adds surface. Skip. Instead `_effective(overrides)` per call. Good.
+
+Stream:
+```python
+    def stream_events(self, messages, *, tools=None, tool_choice="auto", cancel=None, on_delta=None, response_holder=None, **overrides) -> Iterator[StreamEvent]:
+```
+
+Note: `**overrides` after keyword-only args is fine.
+
+Let me write it now. Also `_open`, `_close`, `_require_ready`.
+
+`_close(response)`:
+```python
+    @staticmethod
+    def _close(response: Any) -> None:
+        closer = getattr(response, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                _log.debug("关闭响应失败", exc_info=True)
+```
+
+`_open`:
+```python
+    def _open(self, request, config) -> Any:
+        try:
+            return self.transport.open(request, timeout=float(config.timeout), verify_ssl=bool(config.verify_ssl))
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise classify_error(exc) from exc
+```
+`raise ... from exc` — classify_error returns LLMError. `raise classify_error(exc) from exc` works.
+
+For `_track`:
+```python
+    def _record_usage(self, usage: Usage | None) -> None:
+        if not self.track_usage:
+            return
+        try:
+            self.usage.record(usage)
+        except Exception:
+            _log.debug("记录用量失败（不影响调用）", exc_info=True)
+```
+But requirement: usage missing must not error. `record(None)` handles.
+
+Now `test_connection`:
+```python
+    def test_connection(self, **overrides: Any) -> tuple[bool, str]:
+        """发一次最小请求（max_tokens=1、非流式），返回 (ok, 人话)。
+
+        供设置页的「测试连接」和自检 `doctor` 调用。**绝不抛异常** ——
+        设置页拿到异常只能显示一个栈，而它需要的是"下一步做什么"。
+        """
+        try:
+            config = self._effective(overrides)
+        except TypeError as exc:
+            return False, f"参数不对：{exc}"
+        problems = config.problems()
+        if problems:
+            return False, "；".join(problems) + " —— 到「AI 与对话 → 模型与连接」里填好「接口地址」和「模型名」。"
+        if config.missing_key():
+            _log.info("测试连接：没有可用的 API 密钥（本地服务可以忽略；云端服务多半会返回 401）")
+        try:
+            result = self.complete([{"role": "user", "content": "ping"}], max_tokens=1, temperature=0.0)
+        except LLMError as exc:
+            head = f"连接失败（HTTP {exc.status}）" if exc.status else "连接失败"
+            return False, f"{head}：{exc.hint or exc}"
+        except Exception as exc:
+            return False, f"连接失败：{type(exc).__name__}: {exc}"
+        detail = f"连接成功（HTTP 200，模型 {config.model}"
+        if result.empty: detail += "，返回内容为空"
+        return True, detail + "）"
+```
+Hmm `result.empty` when max_tokens=1 always empty-ish. The message "返回内容为空" might worry users. But max_tokens=1 means content is likely empty or 1 token. Old code returned "连接成功（HTTP {status}）". Let me not mention emptiness: `return True, f"连接成功（HTTP 200，模型 {config.model}）"`. Simpler and never alarming.
+
+Hmm, HTTP 200 hardcoded — we don't get a status from complete. Response object has `.status`; I could capture. Let's capture the status in a small attribute? For `complete` the unified ChatResult could have `status: int = 200`. Let's add `status` field to ChatResult, set from `getattr(response, "status", 200)`. Then test_connection reports the real status. Good idea.
+
+In `complete`: 
+```python
+status = int(getattr(response, "status", 0) or 0) or 200
+```
+Careful if fake has status 200. Fine.
+
+Then test_connection: `detail = f"连接成功（HTTP {result.status}，模型 {config.model}）"`.
+
+Now, the raw payload decode: `response.read()` returns bytes.
+
+Also `complete` should handle `data.get("error")` present with HTTP 200 (some providers do that): raise LLMError from_status if code int else SERVER kind. Let me reuse a helper in errors: `from_payload_error(error) -> LLMError`. I'll add to errors.py:
+
+```python
+def from_payload(error: Any) -> LLMError:
+    """把响应体里的 `error` 字段（HTTP 200 也会出现）归类成 LLMError。"""
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error_message(error)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return from_status(code, message)
+        return LLMError(message, kind=ErrorKind.SERVER, hint="服务端返回了错误 —— 检查密钥额度、模型名与参数；稍后重试。", detail=message)
+    return LLMError(str(error) or "服务端返回了错误", kind=ErrorKind.SERVER, hint="...", detail=str(error))
+```
+And export `error_message` as public helper? Name it `error_message`. sse.py can import it from errors for its mid-stream error. Good — single authority. Export both `error_message` and `from_payload`.
+
+sse.py then: `from .errors import ErrorKind, LLMError, from_payload` — but careful: circular import? errors.py imports nothing from sse/client. sse imports errors. client imports both. No cycle. 
+
+Now write everything. Let me create the todo list first (multi-step task), then write files.
+
+Regarding `__init__.py` of infra/llm: also maybe re-export `Settings`? No.
+
+Let me write the code now. I'll write complete files with rich docstrings in the project's style (Chinese, explanatory, mentioning old-project lessons).
+
+One more consideration in `stream_events`: old code had `response_holder` to let caller close the response early. Keep it.
+
+Also: should stream_events yield "done" event on cancel? No.
+
+Let me write the final code.
+
+For `SSEParser.feed`, careful about `MAX_SSE_BUFFER_BYTES` check placement: check before processing (after adding chunk). If a huge chunk contains many complete events, it would raise even though it's fine (buffer would drain). Old code checked right after append, same behavior. But a legit stream chunk of >1MB is unlikely. Better: only raise if after processing the remainder still exceeds. Implement: process events first, then check remaining buffer length. That's more forgiving and still catches unbounded accumulation. Test with `feed(b"x" * (MAX+1))` → no separator → buffer stays > MAX → raises. Good. I'll do post-check.
+
+Let me write the docstring for MAX: "SSE 单事件缓冲上限：异常 provider 不按事件分隔时会无界堆积".
+
+Now writing files.
+
+For the `Reasoning` event kind: name it `"reasoning"`. Add `StreamEvent.text` returns "" for it. Provide `StreamEvent.reasoning` property? Add:
+```python
+@property
+def reasoning(self) -> str:
+    return self.data if self.kind == "reasoning" and isinstance(self.data, str) else ""
+```
+Good.
+
+Also for ChatResult: `reasoning` field.
+
+Let me write errors.py now.

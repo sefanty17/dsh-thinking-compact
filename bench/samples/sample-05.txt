@@ -1,0 +1,1092 @@
+Very important: `data/settings.json` currently contains ALL DEFAULT VALUES (it was created by one of the earlier tests/runs — a fresh Settings().save()). Everything matches DEFAULTS exactly? Let me spot check a few: `speak_error: false` = default ✓, `wechat_whitelist: ""` ✓ default, `self_talk_bubble_style: "ling_glass"` = default ✓, `persona_id: ""` ✓ default, `scale: "0.72"` ✓ default. So the existing settings.json is a pure-defaults file. 
+
+That's great news for the migration: every migrated value will land as `migrated` (since target == default → safe overwrite without --force). And the "不覆盖" rule still holds for genuinely user-modified values.
+
+Wait, careful: this means the existing file was likely written by test_settings.py? No — test_settings uses tmp dirs. Maybe by `run.py doctor` or setup_wizard (which does `Settings().load()` and maybe save). Actually doctor is read-only. `setup_wizard` might save. Or an earlier task in this project. Anyway, it's all defaults → the real migration will fill in real values. 
+
+Hmm, but that means the "already/default/skipped" distinction: pet_opacity legacy 100 == default → `default` (skip, stays 100 — same). Fine.
+
+And the legacy credential manager has `provider/openai-main` = "sk-141..." (real key!) and no vision key. So the real migration would write the real API key to service `wechat-ai-pet`/`setting/api_key`. That's the intended migration. New entries currently absent.
+
+Now — should I execute the real migration? The settings.json is all-defaults, so executing would populate real values. It's the tool's purpose. The dry-run will show it. I'll decide after.
+
+Note: `models` — legacy model is "deepseek-v4-flash" vs new default "deepseek-chat" → migrated.
+
+Now let me write the migrator. This is the big piece of work. Let me be careful and thorough.
+
+Let me write out the module.
+
+```python
+# -*- coding: utf-8 -*-
+"""app.migrator —— 一次性迁移：把旧桌宠的用户数据搬进本项目，然后切断关系。
+...
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping
+
+from ..infra import paths
+from ..infra.config.schema import ALL_FIELDS, Kind
+from ..infra.config.settings import Settings
+from ..infra.secrets import LEGACY_SERVICE_NAME, SecretStore
+from ..infra.state import RuntimeState, WindowPlacement
+
+__all__ = [...]
+```
+
+Status constants:
+```python
+MIGRATED = "migrated"
+ALREADY = "already"
+DEFAULT = "default"
+UNMAPPED = "unmapped"
+SKIPPED = "skipped"
+FAILED = "failed"
+
+STATUS_LABEL = {MIGRATED: "已迁移", ALREADY: "已有相同值", DEFAULT: "等于默认值", UNMAPPED: "无对应新键", SKIPPED: "跳过", FAILED: "失败"}
+_STATUS_ORDER = (MIGRATED, ALREADY, SKIPPED, FAILED, DEFAULT, UNMAPPED)
+```
+
+Legacy dir:
+```python
+LEGACY_DIR_NAME = "dsh-pet-standalone"   # 旧桌宠在 %APPDATA% 下的数据目录
+#: 环境变量覆盖（测试与自定义安装用）
+_ENV_LEGACY_DIR = "WECHAT_AI_PET_LEGACY_DIR"
+
+def legacy_dir() -> Path:
+    override = os.environ.get(_ENV_LEGACY_DIR, "").strip()
+    if override: return Path(override).expanduser()
+    appdata = os.environ.get("APPDATA", "").strip()
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / LEGACY_DIR_NAME
+
+LEGACY_FILES = {"config": "config.json", "wechat": "wechat.json", "dock": "dock.json", "memory": "memory.db"}
+```
+
+Path getter:
+```python
+_MISSING = object()
+
+def dig(root, dotted, default=_MISSING):
+    """按点号路径取值 ..."""
+    node = root
+    for part in dotted.split("."):
+        if isinstance(node, Mapping) and part in node:
+            node = node[part]
+        else:
+            return default
+    return node
+```
+
+To spec:
+```python
+@dataclass(frozen=True)
+class To:
+    """一条映射：旧键 → 新键。"""
+    key: str = ""
+    convert: Callable[[Any], Any] | None = None
+    expand: Callable[[Any, Mapping], dict[str, Any] | None] | None = None
+    when: Callable[[Mapping], bool] | None = None
+    reject: Callable[[Any], str] | None = None
+    merge: str = ""            # "and" = 与目标现状取与
+    fallback: bool = False
+    note: str = ""
+
+    def produce(self, raw, root) -> dict[str, Any] | None:
+        if self.expand is not None:
+            out = self.expand(raw, root)
+            return None if out is None else dict(out)
+        value = self.convert(raw) if self.convert else raw
+        return {self.key: value}
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        return (self.key,) if self.key else ()
+```
+
+Helper constructors: `T(key, **kw)` = To(key=...). Using the class directly is fine: `To("on_top")`. For readability in the big table, short entries `To("on_top")`. Hmm, 100+ rows of `To("x")` is verbose. Let me allow plain strings in the table: `"on_top": "on_top"` and normalize with `_to(spec)` → To. That makes the table super readable:
+
+```python
+MAPPING_CONFIG: dict[str, To | str] = {
+    "autostart_wanted": "autostart",
+    ...
+    "click_sound_volume": To("click_sound_volume", convert=_percent),
+}
+```
+and normalize in a build step: `_normalize(spec)` → To. For multi-key expand rows I must use To(...) explicitly. Good balance.
+
+Percent conversion:
+```python
+def _percent(raw):
+    """0.0–1.0 浮点 → 0–100 百分数（旧项目存比例、本项目存百分数）。"""
+    return round(float(raw) * 100)  # guard non-numeric
+```
+Guard: if not isinstance(raw, (int,float)) or bool → raise? Let me use a tolerant version returning raw on failure so coerce reports it. Actually `round(float(raw)*100)` may raise ValueError for a bad string → I must not crash the whole migration. I'll wrap all convert/expand calls in try/except → status `failed` with the exception message. Good: the whole migration must never raise.
+
+`_negate`: `lambda v: not _as_bool(v)`. Should I use schema's bool coercion? `_bool_or_default`-like: use `Field.coerce` of a bool field? Simplest: `not bool(raw)` — but for the string "false" bool() is True → wrong. Legacy verify_ssl is a real bool in JSON. I'll use a tolerant `_truthy` that handles str tokens:
+```python
+_TRUE_TOKENS = {"1","true","yes","on","y","t","是","开","启用"} ... 
+```
+Reuse schema's private _TRUE? Not exported. I'll implement a small `_as_bool` with the same token sets (duplicating 2 sets of literals — acceptable, or better: use `schema.ALL_FIELDS["skip_ssl"].coerce(not _as_bool(raw))`... no).
+
+Cleanest without duplication: use the schema's own coercion to normalize the *source* bool: `raw_bool, _ = ALL_FIELDS["skip_ssl"].coerce(...)` — no, that coerces to skip_ssl not the source.
+
+I'll define `_as_bool(raw)`: if isinstance bool → raw; if int/float → bool; if str → token in TRUE set / FALSE set; else bool(raw). I'll define the two token sets locally with a comment "与 schema._TRUE/_FALSE 同一套口径（那边是私有的，这里只为读旧值）". Acceptable duplication with justification. Hmm, "唯一真源" principle... I could import the private `_TRUE`/`_FALSE` from schema — importing a private name is ugly but avoids duplication. Better idea: schema exposes `Kind.BOOL` coercion via a *field*; I can use any BOOL field: `ALL_FIELDS["on_top"].coerce(raw)` returns (bool, error) — using a real field for its coercion is legitimate and stays single-source! But it's a hacky dependency (on_top semantics). Hmm.
+
+Actually the cleanest: `_as_bool(raw)`: 
+```python
+value, error = ALL_FIELDS["skip_ssl"].coerce(raw)... 
+```
+no.
+
+I'll just import the module-level private tokens with a comment:
+```python
+from ..infra.config.schema import _FALSE as _BOOL_FALSE, _TRUE as _BOOL_TRUE  # noqa
+```
+Hmm, that's fragile to renames. Alternatively use `Field.coerce` on a synthetic BOOL field:
+```python
+_BOOL_FIELD = Field(key="_probe", label="bool", kind=Kind.BOOL, default=False)
+def _as_bool(raw): return _BOOL_FIELD.coerce(raw)[0]
+```
+That's clean! It uses the schema's *public* class to do the conversion — single source of truth for the true/false vocabulary. 
+
+Now the config table. Let me write it fully.
+
+```python
+# ═══ config.json ═══
+MAPPING_CONFIG: dict[str, To | str] = {
+    # —— 通用 ——
+    "autostart_wanted": "autostart",
+    "on_top": "on_top",
+    "auto_hide_fullscreen": "auto_hide_fullscreen",
+    "cursor_hidden_passthrough": "cursor_hidden_passthrough",
+    "stream_capture_mode": "stream_capture",
+    # —— 桌宠外观与行为 ——
+    "character": "character",
+    "scale": "scale",
+    "bubble_text_scale": "bubble_text_scale",
+    "pet_opacity": "pet_opacity",
+    "playback_speed": "playback_speed",
+    "animation_gap_seconds": "animation_gap_seconds",
+    "idle_low_fps_enabled": "idle_low_fps",
+    "idle_low_fps_threshold": "idle_low_fps_threshold",
+    "no_move": "no_move",
+    "mouse_through": "mouse_through",
+    # —— 点击与自言自语 ——
+    "click_sound_enabled": "click_sound",
+    "click_sound_pack": To(expand=_click_sound_pack, note="结构体拆成「音源 + 文件/目录」三项"),
+    "click_sound_volume": To("click_sound_volume", convert=_percent, note="0–1 比例 → 0–100 百分数"),
+    "click_show_self_talk": "click_self_talk",
+    "character_profiles": To("click_talk_bindings", convert=_talk_bindings, note="只取台词部分，其余属于运行时状态"),
+    "self_talk_enabled": "self_talk",
+    "self_talk_texts": "self_talk_texts",
+    "self_talk_image_dir": "self_talk_images",
+    "self_talk_image_scale": "self_talk_image_scale",
+    "self_talk_duration_seconds": "self_talk_duration",
+    "self_talk_min_interval": "self_talk_min",
+    "self_talk_max_interval": "self_talk_max",
+    "self_talk_bubble_style": "self_talk_bubble_style",
+    # —— 右键菜单 ——
+    "context_menu_template": "menu_template",
+    "context_menu_appearance.theme": "menu_theme",
+    "context_menu_appearance.density": "menu_density",
+    "context_menu_appearance.corner_radius": "menu_radius",
+    "context_menu_appearance.ui_font": "menu_font",
+    "context_menu_appearance.ui_font_size": "menu_font_size",
+    "context_menu_appearance.translucent": "menu_translucent",
+    "context_menu_appearance.opacity": To("menu_opacity", convert=_percent, note="0.72–1.0 比例 → 72–100 百分数"),
+    "context_menu_appearance.light_background": "light_background",
+    ... 6 colors
+    # —— 大模型 ——
+    "chat.active_provider": "provider_id",
+    "chat.default_system_prompt": "system_prompt",
+    "chat.providers.{provider}.base_url": "api_url",
+    "chat.providers.{provider}.chat_path": "chat_path",
+    "chat.providers.{provider}.model": "model",
+    "chat.providers.{provider}.timeout": "timeout",
+    "chat.providers.{provider}.temperature": "temperature",
+    "chat.providers.{provider}.max_tokens": "max_tokens",
+    "chat.providers.{provider}.vision_model": "vision_model",
+    "chat.providers.{provider}.vision_same_as_chat": "vision_same",
+    "chat.providers.{provider}.vision_base_url": "vision_url",
+    "chat.providers.{provider}.verify_ssl": To("skip_ssl", convert=_negate, note="语义取反"),
+    # —— 聊天窗外观 ——
+    "chat_ui_style": "chat_ui_style",
+    "modern_chat_background": To(expand=_background, when=_is_modern_style, note="..."),
+    "chat_background": To(expand=_background, when=_is_legacy_style, note="..."),
+    "modern_chat_background_fill": To("chat_background_fill", when=_is_modern_style),
+    "chat_background_fill": To("chat_background_fill", when=_is_legacy_style),
+    "modern_chat_background_opacity": To("chat_background_opacity", when=_is_modern_style),
+    "chat_background_opacity": To("chat_background_opacity", when=_is_legacy_style),
+    "modern_chat_card_opacity": "modern_chat_card_opacity",
+    # —— 主动开口 ——
+    ... proactive_*
+    # —— 系统通知 ——
+    "system_notifications_enabled": "system_notifications_enabled",
+    # —— 人设（兜底） ——
+    "dialogue_mode": To("persona_id", fallback=True, note="dock.json 的 persona 优先"),
+}
+
+MAPPING_WECHAT = {...}
+MAPPING_DOCK = {"persona": "persona_id"}
+
+MAPPING: dict[str, dict[str, To|str]] = {"config": MAPPING_CONFIG, "wechat": MAPPING_WECHAT, "dock": MAPPING_DOCK}
+```
+
+STATE rows: separate declaration
+```python
+@dataclass(frozen=True)
+class StateTo: ...
+```
+Simpler: declare a dict of legacy path → ("window"/"island", field)
+```python
+MAPPING_STATE: dict[str, tuple[str, str]] = {
+    "rx": ("window", "rx"),
+    "ry": ("window", "ry"),
+    "screen_name": ("window", "screen_name"),
+    "facing": ("window", "facing"),
+    "dynamic_island.x": ("island", "x"),
+    "dynamic_island.y": ("island", "y"),
+    "dynamic_island.dock_edge": ("island", "dock_edge"),
+}
+```
+Handled by dedicated code that reads all, builds the window/island once, and classifies each key.
+
+RUNTIME_DROPPED (state-ish keys with no home):
+```python
+#: 旧 config.json 里属于"运行状态"、但新 RuntimeState 没有对应字段的键。
+#: 它们不是设置，写进 settings.json 会污染；RuntimeState 也刻意不保留（可随时丢弃）。
+DROPPED_STATE_KEYS: dict[str, str] = {
+    "version": "旧配置版本号",
+    "user_customized": "旧版「用户改过设置」标记",
+    "dialogue_last_scope": "上次对话作用域",
+    "chat_bg_crops": "聊天背景裁剪参数",
+    "character_aliases": "角色别名缓存",
+}
+```
+These are reported in the `dropped` section with status UNMAPPED (or a dedicated label). I'll give them status UNMAPPED but in the `dropped` bucket with a reason. Hmm — statuses must be from the list; UNMAPPED in the dropped bucket is fine ("无对应新键"). 
+
+Now the report & apply logic. Let me write the core:
+
+```python
+@dataclass
+class Item:
+    source: str
+    key: str
+    status: str
+    value: Any = None
+    reason: str = ""
+    note: str = ""
+    def as_dict(self): ...
+```
+
+```python
+@dataclass
+class MigrationReport:
+    legacy_dir: Path
+    data_dir: Path
+    dry_run: bool = False
+    force: bool = False
+    settings_items: list[Item] = field(default_factory=list)
+    state_items: list[Item] = field(default_factory=list)
+    secret_items: list[Item] = field(default_factory=list)
+    memory_item: Item | None = None
+    unmapped_items: list[Item] = field(default_factory=list)
+    dropped_items: list[Item] = field(default_factory=list)
+    sources: dict[str, bool] = field(default_factory=dict)   # 旧文件是否存在
+    problems: list[str] = field(default_factory=list)
+    executed: bool = False   # 是否真的落了盘
+
+    @property
+    def items(self): return settings + state + secrets + memory
+    def counts(self) -> dict[str,int]
+    def unmapped_summary(self, limit=8) -> str
+    def has_legacy_data(self) -> bool
+    def as_dict(self)
+```
+
+Migration entry point:
+
+```python
+def migrate(*, legacy_dir=None, settings=None, dry_run=False, force=False) -> MigrationReport:
+    legacy = Path(legacy_dir) if legacy_dir else _default_legacy_dir()
+    data = paths.data_dir()
+    report = MigrationReport(legacy_dir=legacy, data_dir=data, dry_run=dry_run, force=force)
+
+    sources = {name: _load_json(legacy/fname) for name,fname in ...}
+    # config/wechat/dock → dict or None; 损坏/缺失 → 记录 sources 状态 + problems? 
+```
+Requirement: "缺失/损坏的旧文件不抛异常（旧文件不存在时应该报告"没有可迁移的数据"并正常返回）". So a corrupt JSON → add a problem entry ("config.json 无法解析…") and treat as absent. No exception.
+
+"没有可迁移的数据" → report.summary. I'll implement `report.has_legacy_data()` = any source file present (json parsed) or memory.db present. If nothing → the CLI prints "旧目录里没有可迁移的数据（<path>）" and returns 0.
+
+```python
+    st = settings if settings is not None else Settings()
+    st.load()
+```
+Careful: if the caller passes a Settings that was already loaded, calling load() again is harmless.
+
+Then:
+```python
+    _migrate_settings(report, sources, st, dry_run=dry_run, force=force)
+    _migrate_state(report, sources, dry_run=..., force=...)
+    _migrate_secrets(report, sources, st, dry_run=..., force=...)
+    _migrate_memory(report, legacy, dry_run=..., force=...)
+    if not dry_run and changed: st.save()
+```
+Order: settings first (so persona_id etc. written), then save once at the end. Secrets: write directly through the store (settings.set writes immediately).
+
+Should state be saved before settings? Irrelevant.
+
+Now `_migrate_settings`:
+
+```python
+def _migrate_settings(report, sources, st, *, dry_run, force):
+    seen: set[str] = set()   # 已被映射行消费的旧路径(带文件前缀)
+    claimed: set[str] = set()  # 已由高优先级来源确定的新键
+    rows = []
+    for source_name, table in MAPPING.items():
+        root = sources.get(source_name)
+        if not isinstance(root, Mapping): continue
+        provider = _active_provider(sources.get("config") or {})
+        for path, spec in table.items():
+            to = _normalize(spec)
+            real = path.replace("{provider}", provider) if "{provider}" in path else path
+            rows.append((source_name, path, real, to))
+    for want_fallback in (False, True):
+        for source_name, path, real, to in rows:
+            if to.fallback is not want_fallback: continue
+            root = sources[source_name]
+            seen.add(_key(source_name, real))
+            ...
+```
+Hmm — `{provider}` rows must also mark the *template* as consumed when it can't be resolved. And when the provider id is unknown, report `unmapped` for those rows (with reason). I'll handle: if provider unknown and "{provider}" in path → emit Item(UNMAPPED, reason="无法确定当前 provider（chat.active_provider 缺失）"). Note `_active_provider` uses legacy `chat.active_provider`; if absent, fall back to legacy `chat.providers` single key.
+
+Then per-row apply:
+
+```python
+            raw = dig(root, real)
+            if raw is _MISSING: continue
+            if to.when is not None and not to.when(root):
+                item = Item(source_label, to.key or real, SKIPPED, reason="不适用于当前 chat_ui_style...")
+                → add, continue
+            if to.reject:
+                reason = to.reject(raw)
+                if reason: → Item(SKIPPED, reason), continue
+            try:
+                produced = to.produce(raw, root)
+            except Exception as exc:
+                → Item(FAILED, reason=f"转换出错：{exc}"), continue
+            if not produced:
+                → Item(UNMAPPED, reason="旧值结构无法识别"), continue
+            for new_key, value in produced.items():
+                if to.fallback and new_key in claimed:
+                    → Item(SKIPPED, reason="已有优先级更高的来源"), continue
+                item = _apply_setting(st, new_key, value, source_label, to, dry_run, force)
+                if item.status in (MIGRATED, ALREADY, DEFAULT): claimed.add(new_key)  # hmm
+                report.settings_items.append(item)
+```
+Careful about `claimed`: pass 1 rows claim a target when they actually produce a value (migrated or already). For DEFAULT-produced values (e.g. dock.persona == default? unlikely) — if pass 1 produces a default value, the target isn't really set, but the fallback shouldn't kick in either (the primary source existed and said "default"). I'll claim on MIGRATED/ALREADY/DEFAULT (i.e., any row that successfully produced a value). Only FAILED/SKIPPED/UNMAPPED don't claim. Hmm: if the primary row was SKIPPED because the target had a conflicting non-default value, should the fallback then apply? No — the target already has a non-default value; the fallback would also be skipped as conflicting. So don't claim; the fallback row will be evaluated and (likely) skipped as "目标已有非默认值". Fine.
+
+`_apply_setting`:
+```python
+def _apply_setting(st, key, value, source, to, dry_run, force) -> Item:
+    item = ALL_FIELDS.get(key)
+    if item is None:
+        return Item(source, key, UNMAPPED, reason="新 schema 里没有这个键（映射表过期了）")
+```
+This is a real safety net for typos in my table. Good. Also good for the test "mapping targets all exist in schema" (I'll add a test that every To.key ∈ ALL_FIELDS).
+
+```python
+    coerced, error = item.coerce(value)
+    if error and item.kind not in (Kind.INT, Kind.FLOAT):
+        return Item(source, key, FAILED, value=value, reason=f"旧值不符合新设置：{error}")
+    note = to.note
+    if error:  # 数值钳位
+        note = (note + "；" if note else "") + error
+    if item.is_secret:
+        return _apply_secret(...)   # never in MAPPING though
+    if coerced == item.default:
+        if not dry_run: pass  # 什么都不做
+        return Item(source, key, DEFAULT, value=coerced, note=note)
+    current = st.get(key)
+    if coerced == current:
+        return Item(source, key, ALREADY, value=coerced, note=note)
+    if current != item.default and not force:
+        return Item(source, key, SKIPPED, value=coerced, reason=f"目标已有非默认值 {current!r}，未覆盖（要覆盖请加 --force）", note=note)
+    if dry_run:
+        return Item(source, key, MIGRATED, value=coerced, note=note)
+    ok, err = st.set(key, coerced)
+    if not ok: return Item(source, key, FAILED, reason=err)
+    _changed = True
+    return Item(source, key, MIGRATED, value=coerced, note=err or note)
+```
+Need a mutable `changed` flag → use a small mutable holder or return via the report (`report.executed`). I'll track a module-level? No — I'll pass a `plan`/`state` object. Let me create a private `_Ctx` dataclass holding st, dry_run, force, provider, and `changed: bool`, `claimed: set`. Methods on it. That's cleaner OO. Let me restructure:
+
+```python
+class _Plan:  # 内部：一次迁移的可变状态
+    def __init__(self, report, settings, dry_run, force):
+        ...
+        self.changed = False
+        self.claimed: set[str] = set()
+```
+And free functions take `plan`.
+
+Also the "already" case: `current == coerced`. For DEFAULT-value produced and current==coerced==default → returns DEFAULT first. Fine.
+
+Hmm, one subtlety: for a *clamped* numeric where coerce error occurred, I treat it as migrate-with-note. But if the clamped value == default → DEFAULT status with the clamp note. Good.
+
+Also: I should NOT write when `dry_run`, obviously. And `changed` must be False in dry-run (so no save). I'll set changed only in the write path.
+
+Now `_apply_secret` isn't needed since secrets aren't in MAPPING (api_key/vision_key are Kind.SECRET and handled by the dedicated secrets migration). But if someone put a SECRET key in the table, `st.set` would write to keyring — in dry-run that would be a real write! I'll guard: if item.is_secret and dry_run → return MIGRATED without writing; and add a comment. Actually simplest: never put secrets in the table, and if `item.is_secret` is encountered, handle it via `st.set` only when not dry_run. I'll include the guard for safety.
+
+Now the unmapped scan:
+
+```python
+def _scan_unmapped(root, source_name, consumed: set[str]) -> list[Item]
+```
+Walk the legacy dict; produce dotted paths for leaves; classify:
+- if path in consumed → skip (already reported as a mapped row)
+- if path in DROPPED_STATE_KEYS → dropped bucket
+- else → unmapped Item(source=path, key="", reason=...)
+
+Recursion rules:
+```python
+def _walk(node, prefix, out):
+    for key, value in node.items():
+        path = f"{prefix}{key}"
+        if _expandable(path) and isinstance(value, Mapping):
+            _walk(value, path + ".", out)
+        else:
+            out.append(path)
+```
+where
+```python
+#: 这些旧键是"一大块设置"，要逐个叶子展开报告；
+#: 其余 dict（agent_link / menu_easter_egg / quick_launch_apps …）属于已砍功能，整体报一条就够。
+_EXPAND_BLOCKS = ("chat", "chat.providers", "context_menu_appearance", "dynamic_island", "proactive_screen", "wechat", "tts", "tts.adapters", "speak_events", "chat_speak")
+def _expandable(path):
+    return path in _EXPAND_BLOCKS or path.startswith("chat.providers.")
+```
+Careful: `path.startswith("chat.providers.")` makes `chat.providers.openai-main` expandable → its leaves are reported. ✓. And `tts.adapters` expandable → `tts.adapters.sapi` is not in the list → reported as one leaf `tts.adapters.sapi`?? That's wrong: I want `tts.adapters.sapi.voice` etc. So I need `tts.adapters.sapi|edge|gsv` expandable too. Let me generalize: a dict is expandable if its path is in _EXPAND_BLOCKS **or any of its ancestors is a "root block"**... no, then agent_link would expand too.
+
+Rule: expandable if path is in _EXPAND_BLOCKS, or parent path is in _EXPAND_BLOCKS (one more level), or grandparent... Let me define `_EXPAND_DEPTH_ROOTS = {"chat", "context_menu_appearance", "dynamic_island", "proactive_screen", "wechat", "tts", "speak_events", "chat_speak"}` and allow expansion while the path is at most 3 levels below one of those roots:
+```python
+def _expandable(path):
+    parts = path.split(".")
+    for root in _EXPAND_ROOTS:
+        rp = root.split(".")
+        if parts[:len(rp)] == rp and len(parts) <= len(rp) + 2:
+            return True
+    return False
+```
+For "tts.adapters.sapi.voice": parts len 4, root "tts" (len 1) → 1+2=3 < 4 → not expandable. But "tts.adapters.sapi" (len 3) → expandable ✓, and then its *children* (len 4) are leaves of the walk — the walk only recurses when `_expandable(path)` is true for that dict node. When visiting "tts.adapters.sapi" (expandable ✓) I recurse into it and emit its leaves directly (voice/rate/volume) without checking expandability on the leaves (they're not dicts anyway). The check happens on the node being visited, so `len(parts) <= len(root)+2` covers tts.adapters.sapi (3 ≤ 3 ✓). For chat.providers.openai-main (3 ≤ 1+2=3 ✓) → expandable → leaves at len 4. ✓ Same for tts.adapters.sapi. 
+
+But careful: `chat.providers` (2 ≤ 3 ✓) expandable → recurse → `chat.providers.openai-main` (3 ✓) expandable → recurse → leaves. ✓
+And `wechat` (1 ≤ 3 ✓) → leaves. ✓
+`dynamic_island` ✓. `agent_link` not in roots → reported as one ✓. `menu_easter_egg` ✓. `file_interpret` ✓. `quick_launch_apps` (a list) ✓. `music_player_paths` ({} dict) ✓ one key. `todo_reminder_*` are scalars ✓.
+
+Good. Note `chat.providers.<id>` expansion means `chat.providers.openai-main.name`, `.api_key_ref`, `.vision_api_key_ref`, `.enabled`(n/a) become unmapped items — accurate (name/api_key_ref/vision_api_key_ref have no new keys). Good, and honest: I'll mention in the report that provider `name` has no target (schema has no provider_name).
+
+Hmm wait, that leaves `chat.providers.openai-main.api_key_ref` reported as unmapped, which is good since we handle the actual secret separately (and the item for `chat.providers.{provider}` is consumed by rows? No! Only `chat.providers.{provider}.base_url` etc. are consumed. The `api_key_ref` leaf is a separate path → unmapped ✓. And I should add an explicit note that the key itself was migrated via the secret section.
+
+Now, `consumed` marking for `{provider}` rows: the real path is `chat.providers.openai-main.base_url`. ✓
+
+The secrets section:
+```python
+def _migrate_secrets(plan, report, sources):
+    provider = plan.provider
+    if not provider:
+        report.secret_items.append(Item("chat.active_provider", "setting/api_key", UNMAPPED, reason="无法确定 provider，无法定位旧凭据"))
+        return
+    pairs = ((f"provider/{provider}", "api_key"), (f"provider/{provider}/vision", "vision_key"))
+    store = plan.store   # Settings._secrets is private!
+```
+Hmm — I need the SecretStore to read from the LEGACY service. `Settings` doesn't expose the store publicly. Options:
+(a) `secrets = settings._secrets` — private access, bad.
+(b) Construct a SecretStore() for reading the legacy service, and use `settings.set("api_key", value)` for writing (which routes through the injected store). But in tests the injected store is InMemory and the *reading* would then use a real SecretStore → real keyring read (read-only, but the test must not touch the real keyring even for reads... a read doesn't write, but the requirement says keys must go into InMemorySecretStore; reading the real keyring in a test is still "touching" it — and with InMemorySecretStore preloaded with the fake legacy value, a real-store read would return "" → the test fails).
+(c) Add a `secrets` parameter to `migrate(...)`: `store: SecretStore | None = None`; default → the store from a new Settings. But then the test passes `store=InMemorySecretStore()` AND `settings=Settings(path, secrets=store)` — the same object. Slightly redundant but explicit and clean.
+
+Better: give the migrator a single injected store and build the Settings when none is given:
+```python
+def migrate(*, legacy_dir=None, settings=None, secrets=None, dry_run=False, force=False):
+    if settings is None:
+        store = secrets or SecretStore()
+        settings = Settings(secrets=store)
+    ...
+```
+and for reading legacy refs I need a store object. I can read legacy refs through the *same* store passed in (by reusing `settings`'s store if accessible). Hmm.
+
+Cleanest: `Settings` needs a way to read from another service. Look at `Settings.migrate_secrets_from_legacy(refs)` — it exists but only handles same-ref migration, not ref renaming. Dead end for rename.
+
+Option: add a public-ish accessor? I can't modify settings.py (only migrator.py, tests, cli.py allowed).
+
+So: the migrator takes `secrets: SecretStore | None = None` (the store to use for BOTH reading legacy entries and writing new ones), and builds Settings with it when settings is None. When `settings` is provided, I derive the store... I need it. I'll require: pass `store` explicitly, or pass `settings` built with that same store — but I can't extract it from Settings without touching privates.
+
+Pragmatic solution: the migrator accepts `store` (a SecretStore-like) as its own parameter, defaulting to `SecretStore()`. When `settings` is None it builds `Settings(secrets=store)`. In tests, pass both `settings=Settings(path, secrets=store)` and `store=store`. Document that clearly. `settings._secrets` is only used as a fallback if `settings` was provided without `store`... 
+
+Even better: define migrate's signature as:
+```python
+def migrate(*, legacy_dir=None, data_dir?? no, settings=None, store=None, dry_run=False, force=False)
+```
+with:
+```python
+store = store or SecretStore()
+st = settings if settings is not None else Settings(secrets=store)
+```
+And in tests: `store = InMemorySecretStore(); st = Settings(path, secrets=store); migrate(settings=st, store=store, dry_run=True)`. Clean, no private access. ✓
+
+For the write path I use `st.set("api_key", value)` (routes through st's store) and for reads `store.get(old_ref, service_name=LEGACY_SERVICE_NAME)`.
+
+Note: reading a legacy secret in **dry-run** does hit the real keyring (read-only). That's acceptable and necessary to report the plan (and for the real run, the CLI default store is the real SecretStore → reads the real legacy entry). For tests, the InMemory store handles it. ✓
+
+Secrets statuses:
+```python
+for old_ref, setting_key in pairs:
+    new_ref = f"setting/{setting_key}"
+    legacy_value = store.get(old_ref, service_name=LEGACY_SERVICE_NAME)
+    current = store.get(new_ref)
+    if not legacy_value:
+        item = Item(old_ref, new_ref, DEFAULT, reason="旧凭据管理器里没有这一条，无需迁移")
+    elif current == legacy_value:
+        item = ALREADY
+    elif current and not force:
+        item = SKIPPED("目标已有不同密钥，未覆盖")
+    elif dry_run:
+        item = MIGRATED
+    else:
+        ok = store.set(new_ref, legacy_value)   # 或 st.set(setting_key, legacy_value)
+        item = MIGRATED if ok else FAILED
+```
+Use `store.set(new_ref, ...)` directly — simpler and symmetric (new_ref == f"setting/{setting_key}" which is exactly what Settings._secret_ref produces, so both routes agree). But to keep the "setting key" abstraction, `st.set(setting_key, value)` is nicer (goes through the schema). I'll use `st.set` for the write and note that it lands at `setting/<key>`. Hmm, but if `settings` is provided and `store` is a *different* object, they'd diverge. I'll use `store.set(new_ref, ...)` for writing (single store, unambiguous) and document that `new_ref` mirrors `Settings._secret_ref`. Hmm, duplicating the ref format "setting/{key}" — that's the single-source concern. I can derive it: `st._secret_ref(key)` is private.
+
+Hmm. I'll use `st.set(key, value)` for writes (public API, correct ref derivation, respects SECRET coercion) and `store.get(old_ref, LEGACY)` for reads. Document that `store` must be the same store the Settings uses (defaults make that automatic; tests pass both). If someone passes mismatched objects, writes go to the settings store — that's the sane behavior anyway. And for the *target current value* read I should use `st.secret(key)` (public) rather than `store.get(new_ref)` → consistent with the write path. 
+
+So:
+- read legacy: `store.get(old_ref, service_name=LEGACY_SERVICE_NAME)`
+- read target: `st.secret(key)`  (public; reads via the settings store, falls back to plaintext from the settings file)
+- write: `st.set(key, value)`
+This is clean, uses public APIs, and keeps one truth. ✓
+
+And `store` default = `SecretStore()`; if `settings` is provided and `store` is None, then... the legacy read would use a fresh real SecretStore (bad for tests). I'll make `store` default to None and resolve:
+```python
+store = store if store is not None else (SecretStore() if settings is None else None)
+```
+Hmm, if settings is provided and store is None → reading legacy entries is impossible → report the secrets as FAILED/"未提供密钥存储"? That would break the "just pass settings" convenience. 
+
+Decision: make `store` required to be consistent: default None → create `SecretStore()` and, if `settings is None`, build `Settings(secrets=store)`. If `settings` is provided without `store`, we use a fresh `SecretStore()` for legacy reads — which is the *correct* production behavior (legacy creds live in the real Windows CM) and harmless in production; tests always pass both. Wait, but that's exactly the trap: a test that passes only `settings` (in-memory) would hit the real keyring for legacy reads. A read is not a write, but the fake-legacy-key test would fail (returns "") → it would show up as `default`. To make the trap impossible to fall into silently, I'll raise a clear error? No — better: make the legacy read store derive from the same object when possible. 
+
+Alternative that solves everything: read legacy creds via a *new* SecretStore only when `store` is None AND `settings` is None; otherwise require `store` for secret migration, else mark secrets as FAILED with the reason "没有提供密钥存储，跳过密钥迁移". Hmm, that would make the CLI-with-settings path skip secrets.
+
+Let me look at how the CLI will call it: `migrate(legacy_dir=..., dry_run=..., force=...)` — no settings, no store → store=SecretStore(), settings=Settings(secrets=store). ✓ That's the production path.
+
+Tests: `migrate(legacy_dir=tmp, store=inmem, settings=Settings(path, secrets=inmem), dry_run=True)`. ✓
+
+So: if `settings` is provided but `store` is None → create a plain SecretStore() for legacy reads (documented). Simple, matches production semantics, and the test just has to pass store. I'll document it in the docstring: "测试必须同时传 settings 与 store（同一个 InMemory 实例），否则读旧凭据会落到真实凭据管理器". And I'll add a test asserting that passing an explicit in-memory store means no real keyring is touched (can't easily assert that... I can assert the fake legacy value was read & written into the in-memory store, which proves reads came from it: if reads had hit the real CM, the status would be `default` not `migrated`). ✓ That's an effective guard.
+
+Better still: to make the guard structural, I'll set `store` default to None and do:
+```python
+if store is None:
+    store = SecretStore() if settings is None else _NULL_STORE  # 明确的空存储
+```
+No, over-engineering. Go with the plain approach + a clear docstring warning + the test proving it.
+
+Hmm, actually here's a cleaner idea: accept `settings` and derive the store for *both* purposes by having migrate build the Settings itself when a store is given:
+```python
+def migrate(*, legacy_dir=None, settings=None, store=None, dry_run=False, force=False):
+    if store is None:
+        store = getattr(settings, "_secrets", None) if settings is not None else None
+```
+Using getattr with a private name — meh, but it's a *defensive fallback*, and it makes tests safe by construction. I'll do:
+```python
+    if store is None and settings is not None:
+        # 从已注入的 Settings 里借用同一个密钥存储（否则读旧凭据会连真实凭据管理器）
+        store = settings._secrets  # noqa: SLF001 —— 迁移必须与设置层用同一个存储
+```
+Accessing a private attr is ugly. Hmm. Is there a public way? `settings.secret_available`/`secrets_available`/`migrate_secrets_from_legacy` — no getter for the store.
+
+You know what — the *simplest correct* design: make `store` the primary injected dependency, and construct Settings internally (never accept a Settings). But tests need to control the settings path → that's what `WECHAT_AI_PET_DATA` is for! The task explicitly says: "用 `WECHAT_AI_PET_DATA` 环境变量把数据目录指到临时目录；构造 `Settings(path, secrets=InMemorySecretStore())`".
+
+Hmm, it says construct Settings(path, secrets=InMemory...). So tests construct Settings themselves. That suggests migrate accepts a Settings. To get the store for legacy reads, I'll just require the caller to pass the store too... 
+
+OK final decision: signature `migrate(*, legacy_dir=None, settings=None, store=None, dry_run=False, force=False)`; if `store is None`: use `SecretStore()`; if `settings is None`: `Settings(secrets=store)`. Docstring clearly states: when you inject a Settings with an in-memory store for tests, also pass `store=` (the same instance) — otherwise legacy creds are read from the real credential manager. Plus the tests do it right. And I'll add an assertion-free but structural safeguard: if `settings is not None and store is None`, print/log a warning? A `problems` entry: "未显式提供密钥存储：旧凭据将从真实凭据管理器读取" — that's informative in the report for the production path too... no, production has settings=None. I'll just document it.
+
+Hmm, wait. Cleanest of all: `store or (settings and store_from_settings)`. Let me just add a tiny public-ish helper in the migrator that reads the store via `getattr(settings, "_secrets", None)`. It's my own project's code; accessing a private attribute across modules is a smell but with a comment explaining "迁移必须与 Settings 用同一个存储，否则测试会连真实凭据管理器（旧项目踩过的坑）". Versus requiring the test to pass store= explicitly.
+
+I'll go with: explicit `store` param, and if it's None, fall back to `getattr(settings, "_secrets", None)` before creating a fresh `SecretStore()`. This gives safety by construction AND correct production behavior. With a clear noqa comment. Actually — hmm, `Settings._secrets` is set in `__init__` always, so getattr always succeeds. So:
+
+```python
+if store is None and settings is not None:
+    store = getattr(settings, "_secrets", None)
+if store is None:
+    store = SecretStore()
+if settings is None:
+    settings = Settings(secrets=store)
+```
+`getattr(settings, "_secrets")` — a private access, one line, heavily commented. I'm fine with this: it makes the test-safety trap impossible. I'll ALSO expose `store` as a param so it can be explicit.
+
+Good. Moving on.
+
+`_migrate_state`:
+```python
+def _migrate_state(plan, report, sources):
+    cfg = sources.get("config")
+    if not isinstance(cfg, Mapping): return
+    state = RuntimeState()          # 路径来自 paths.py
+    state.load()
+    # 先建出目标值
+    wants_window = {f: dig(cfg, p) for p,f in ...}
+```
+Implementation:
+```python
+    fields = {}   # ("window", f) -> value
+    for path, (owner, fname) in MAPPING_STATE.items():
+        raw = dig(cfg, path)
+        if raw is _MISSING: continue
+        fields[(owner, fname)] = raw
+    if not fields: return
+    # 目标默认值
+    defaults = {"window": WindowPlacement().clamped(), "island": IslandGeometry().clamped()}
+    current = {"window": state.window, "island": state.island}
+```
+Then classify each legacy key:
+```python
+    for path, (owner, fname) in MAPPING_STATE.items():
+        if (owner,fname) not in fields: continue
+        raw = fields[...]
+        norm = _normalize_state_value(owner, fname, raw)  # rx/ry float, x/y int, others str
+        default = getattr(defaults[owner], fname)
+        cur = getattr(state.<owner>, fname)  # current
+```
+Use `state.window`/`state.island` and getattr. Then apply the same 4-way rule and record Items with key=`state.json:window.rx` etc.? The `key` field should be the new location: I'll use `window.rx` / `island.x` (state.json paths) and mention state.json in the section header. For `screen_name` → `window.screen_name`.
+
+Apply: collect the desired values for each owner, then call the setters:
+```python
+    win = dict(rx=..., ry=..., screen_name=..., facing=...)  # 用 legacy 值覆盖，其余保持 state 现值
+```
+Careful: set_window_position(rx, ry) then set_facing(facing) then set screen_name. If only `facing` was present in the legacy data, rx/ry must stay at the current state values → so I build the final WindowPlacement from the current one plus the migrated fields. Same for island.
+
+So:
+1. Compute `migrated = {("window","rx"): value, ...}` only for entries whose status is MIGRATED (i.e., would change).
+2. If dry_run → don't touch state; report items only.
+3. Else → build:
+```python
+    win = state.window
+    island = state.island
+    for (owner, fname), value in migrated.items():
+        if owner == "window": win = replace(win, **{fname: value})
+        else: island = replace(island, **{fname: value})
+    state.window = win.clamped()  # hmm, clamped() returns a new clamped object
+    state.island = island.clamped()
+    state.mark_dirty(); state.save_if_dirty()
+```
+`replace` from dataclasses ✓. This uses the dataclasses directly rather than the setters. The task said "见 infra/state.py 的 RuntimeState：set_window_position / set_facing / set_island_geometry" — a suggestion. Using `replace` + clamped + mark_dirty + save_if_dirty is more precise for partial data. But to honor the spirit, I could call the setters when the corresponding keys are present:
+```python
+    if ("window","rx") in migrated or ("window","ry") in migrated:
+        state.set_window_position(win.rx, win.ry)
+    if ("window","facing") in migrated: state.set_facing(win.facing)
+    if ("window","screen_name") in migrated: state.window.screen_name = ...
+```
+Mixing is messier. I'll use the setters for rx/ry and facing (as suggested) and then fix up screen_name with a `replace`:
+
+Actually simplest readable approach that still uses the public setters:
+```python
+    win = state.window
+    if any rx/ry migrated: win = WindowPlacement(rx=.., ry=.., screen_name=win.screen_name, facing=win.facing)
+    ...
+    state.window = win.clamped()
+    state.island = island.clamped()
+    state.mark_dirty()
+    state.save_if_dirty()
+```
+I'll do this but ALSO call the setters first to keep the "官方 API" flavor? No. I'll use the setter functions where they exactly fit and construct the dataclass where they don't. Let me write:
+
+```python
+    # 用 state.py 的公开接口写入（它负责钳位与 mark_dirty）
+    if ("window", "rx") in migrated or ("window", "ry") in migrated:
+        state.set_window_position(win_rx, win_ry)
+    if ("window", "facing") in migrated:
+        state.set_facing(win_facing)
+    if ("window", "screen_name") in migrated:
+        state.window = replace(state.window, screen_name=win_screen).clamped()
+        state.mark_dirty()
+    if island keys migrated:
+        state.set_island_geometry(dock_edge=..., x=..., y=...)
+    state.save_if_dirty()
+```
+where win_rx = migrated[("window","rx")] if present else state.window.rx (etc.). And set_island_geometry only overrides the ones passed (None = keep) — but x could legitimately be... x is int|None; passing x=None means "keep" (can't clear). Legacy x is always an int if present. Fine.
+
+This is clean and uses the documented API. ✓
+
+`_normalize_state_value`:
+- rx/ry → float (clamped by WindowPlacement.clamped)
+- x/y → int if numeric else None → if None, treat as missing? I'll skip non-numeric x/y with a FAILED item.
+- screen_name/facing/dock_edge → str
+
+Now `_migrate_memory`:
+```python
+def _migrate_memory(plan, report, legacy):
+    src = legacy / LEGACY_MEMORY_FILE
+    dst = paths.memory_db_path()
+    if not src.is_file():
+        report.memory_item = Item(str(src), str(dst), DEFAULT, reason="旧长期记忆库不存在")
+        return
+    if dst.is_file() and dst.stat().st_size > 0:
+        if _same_file(src, dst): ALREADY
+        elif not force: SKIPPED("目标已有记忆库（x 字节）…")
+        else: copy → MIGRATED
+    elif dry_run: MIGRATED
+    else: copy → MIGRATED / FAILED
+```
+`_same_file`: size equal and abs(mtime diff) < 2 → ALREADY.
+
+Also: if `memory.db-wal` is non-empty, the copy might miss recent writes. I'll add a note/warning in `problems` if the -wal file is non-empty: "旧记忆库有未合并的 -wal（N 字节），复制可能缺最近写入". Real -wal is 0 bytes → no warning. Good detail.
+
+Now the `report.problems` list: corrupt legacy files, migration failures, etc.
+
+Report summary:
+```python
+    def summary(self) -> str:
+        c = self.counts()
+        ...
+```
+
+CLI output `format_text(report, verbose=False)`:
+```
+一次性迁移（旧桌宠 → 本项目）
+  旧数据：C:\Users\...\dsh-pet-standalone
+  新数据：D:\...\wechat_ai_pet\data
+  模式：DRY RUN（不会写任何文件）/ 实际执行（可加 --dry-run 先空跑）
+
+[设置] migrated 24 / already 0 / skipped 1 / failed 0 / default 61
+  ✓ self_talk_texts            → self_talk_texts
+     好女孩……\n好模型……   (too long?) 
+  ...
+[运行时状态] migrated 6 → data/state.json
+[密钥] ✓ provider/openai-main → setting/api_key（值不显示）
+[长期记忆] ✓ memory.db → data/memory.db（45 KB）
+[未映射] 62 个键没有对应新设置（已砍功能/已废弃），未写入：collision_enabled, collision_friction, ...
+[有意丢弃的运行时状态] 5 个：version, user_customized, ...
+```
+Value display: truncate to 60 chars, and NEVER print secret values.
+
+Let me now write the files. Also I must add `migrate` to cli.py.
+
+One more: requirement 6 wants the per-key status list. I'll print all items with status in (MIGRATED, ALREADY, SKIPPED, FAILED) and summarize DEFAULT/UNMAPPED. With `--verbose`, print everything.
+
+Let me now think about the "already" semantics for `already` when the target file didn't exist (created=default). Fine.
+
+Idempotency check on the second run (real): pass 1 rows see target == legacy value → ALREADY; state rows → ALREADY; memory → ALREADY (size+mtime match); secrets → ALREADY. And `changed` stays False → no save (settings.json untouched). 
+
+But careful: `Settings.load()` on the second run reads the migrated settings.json; `persona_id` = "persona_deepseek" (non-default) → pass 1 dock.persona produces "persona_deepseek" == current → ALREADY ✓.
+
+And the `wechat_db_path` guard: on the second run the target is still "" (default) and the guard still rejects → SKIPPED. Consistent ✓.
+
+Now, the tests. I need a fake legacy dir with config.json/wechat.json/dock.json and memory.db. Also fake provider id. Let me design test cases:
+
+```python
+def _legacy_config() -> dict: {...}
+def _make_legacy(dir) -> Path: writes config.json, wechat.json, dock.json, memory.db
+def _anon_env(tmp) -> contextmanager: sets WECHAT_AI_PET_DATA + WECHAT_AI_PET_LEGACY_DIR?
+```
+Tests call `migrate(legacy_dir=legacy, settings=st, store=store, dry_run=...)` directly with legacy_dir passed explicitly — no need for the env var for the legacy dir. But WECHAT_AI_PET_DATA must be set for paths.* (state/memory/settings default). I set it via a context manager.
+
+Since `Settings` path is explicit, `paths.settings_path()` isn't needed, but `paths.state_path()` and `paths.memory_db_path()` are → so WECHAT_AI_PET_DATA must be set to tmp.
+
+Tests list (from requirements):
+1. test_scalar_migration — basic scalars land in settings.json (self_talk_texts multiline, character, on_top, wechat whitelist from wechat.json, tts, provider model/api_url...)
+2. test_volume_and_opacity_are_percent — click_sound_volume 0.35→35; menu opacity 0.72→72
+3. test_verify_ssl_is_negated — verify_ssl False → skip_ssl True
+4. test_click_sound_pack_variants — 4 cases (duck, default, file, folder)
+5. test_cut_features_go_unmapped_and_are_not_written — collision_*, agent_link, festival_*, music_*, todo_*, etc. → unmapped counted, and settings.json has no such keys (Settings.save strips unknown anyway, but assert the report and that data/settings.json lacks them)
+6. test_idempotent_second_run — run twice: second run has 0 migrated, all already; file contents identical (compare bytes/mtime? compare json) 
+7. test_no_overwrite_by_default_and_force — pre-set a target non-default value → skipped; with force → migrated
+8. test_dry_run_writes_nothing — snapshot the data dir before/after (no settings.json created, no state.json, no memory.db, secret store unchanged)
+9. test_runtime_state_goes_to_state_json — rx/ry/facing/island x/y/dock_edge in state.json; and NOT in settings.json (assert persona... assert "rx" not in settings keys, "island_dock_edge" untouched/absentish) — note settings.json will contain island_dock_edge (schema default) — assert `settings.json` has no "rx"/"ry"/"facing" keys at all ✓ and state.json has them.
+10. test_missing_and_corrupt_legacy_files — empty dir → no exception, "没有可迁移的数据", all counts zero; corrupt config.json → no exception, problems mentions it, but wechat.json still migrates.
+11. test_secrets_migrated_without_deleting_source — InMemory store preloaded with "provider/openai-main" → after run `store.get("setting/api_key")` == value AND `store.get("provider/openai-main")` still there.
+12. test_dry_run_does_not_write_secrets — dry run: store has no "setting/api_key" but the item says migrated.
+13. test_mapping_targets_exist_in_schema — every To.key/expand output key ∈ ALL_FIELDS.
+14. test_suite_never_touches_real_keyring — self-scan guardrail.
+15. test_wechat_db_path_outside_project_is_not_migrated (guard) — legacy db_path outside project → skipped, wechat_db_path stays "".
+16. test_persona_prefers_dock_json — dock persona wins over dialogue_mode.
+17. test_memory_copy_and_skip — memory.db copied; second run → already; pre-existing non-empty dst without force → skipped.
+18. test_island_info_mode_balance_falls_back_to_time.
+19. test_no_legacy_files_touched — snapshot the legacy dir file hashes before/after a real run (requirement 3: 不删源数据). Good test!
+
+That's comprehensive. Let me also ensure the `_main()` runner style mirrors the other test files, and it must be runnable standalone.
+
+For #8 dry-run writes nothing: assert not (tmp/"settings.json").exists() etc.
+
+For #10 corrupt: `problems` non-empty.
+
+Now let me write the code. It's long; let me be careful.
+
+Also, one important detail for `_scan_unmapped`: it must skip consumed paths. I'll compute `consumed` as a set of (source_name, path) strings. For the `{provider}` rows I mark the resolved path. Rows whose `when` failed or `reject` fired ARE consumed (they're reported as skipped). Rows that produced values are consumed. Rows whose path was missing → not consumed but also not present in the data (nothing to scan). Rows where the legacy key EXISTS but `_MISSING`? no.
+
+Careful: rows not present in the file (raw is _MISSING) → nothing.
+
+Also: rows for `{provider}` when the provider can't be resolved → the template path is unconsumed, but the actual legacy path exists (`chat.providers.openai-main.base_url`) → would be reported as unmapped. Since _active_provider falls back to the single provider key, this only happens with 0 providers. Acceptable.
+
+Let me write it now. I'll write migrator.py in full.
+
+Also需要 `_percent` guard: if raw is a bool → weird; `float(True)` = 1.0 → 100. Whatever.
+
+`_percent`:
+```python
+def _percent(raw):
+    """旧项目把音量/不透明度存成 0.0–1.0 的比例，本项目存 0–100 百分数。"""
+    value = float(raw)
+    if value <= 1.0:
+        value *= 100.0
+    return round(value)
+```
+Hmm — should I be lenient if the legacy value is already 70 (a percentage)? The notes say legacy stores 0.0–1.0 for click_sound_volume and 0.72–1.0 for menu_opacity. If a hand-edited config had 70, ×100 = 7000 → clamped to 100 with an error → reported as migrated-with-note (clamped). The `<= 1.0` leniency makes it robust: 0.7 → 70, 70 → 70. But then a legacy value of exactly 1.0 → 100 ✓ (correct: 1.0 = 100%). And 0.72 → 72 ✓. A genuine legacy "1.0" for volume means 100% ✓. So the leniency is harmless and protective. I'll include it with a comment. Hmm, but is it "correct" per the notes? For menu_opacity the range is 0.72–1.0 → all ≤ 1 → ×100 ✓. For click_sound_volume 0.0–1.0 ✓. So `<=1.0` never misfires for valid legacy data. ✓ Include.
+
+Now `_click_sound_pack`:
+```python
+def _click_sound_pack(raw, root=None):
+    if not isinstance(raw, Mapping):
+        return None
+    kind = str(raw.get("kind") or "").strip().lower()
+    ident = str(raw.get("id") or "").strip().lower()
+    path = str(raw.get("path") or "").strip()
+    if kind == "builtin":
+        if ident in ("default", "duck"):
+            return {"click_sound_pack": ident}
+        return None      # 未知内置音源
+    if kind == "file":
+        if not path: return None
+        return {"click_sound_pack": "custom_file", "click_sound_file": path}
+    if kind == "folder":
+        if not path: return None
+        return {"click_sound_pack": "custom_folder", "click_sound_dir": path}
+    return None
+```
+Careful: if kind=="file" and path is empty → returning None gives UNMAPPED with "结构无法识别". Better to still set pack="custom_file" and let the file stay ""? The new schema has no `requires` between them presumably. I'll return {"click_sound_pack": "custom_file"} without the file (the user must pick one; the schema help says so). Hmm, but then the pack points at a nonexistent file. Keep it simple: if path missing → return None (unmapped, reason explains). I'll return a dict {"click_sound_pack": "custom_file"} — no. Decision: return None when the path is missing (the item is reported unmapped with reason "结构无法识别（缺 path）"). My produce returning None gives a generic reason; let me allow expand to raise a `_Reject(reason)`? Simpler: expand can return a dict with a special key `"__reason__"`? Hacky.
+
+Let me change the contract: `expand(raw, root) -> dict | str | None`, where a `str` result means "rejected, here's why" (status UNMAPPED + reason). Hmm, type-union but documented. Or raise a custom exception `Skip(reason)` caught by the plan. That's clean:
+```python
+class NotMappable(Exception):
+    """旧值结构无法映射到新键 —— 报告成 unmapped 而不是崩掉。"""
+```
+and `_click_sound_pack` raises NotMappable("内置音源 id 认不出来：xxx"). The plan catches NotMappable → UNMAPPED with the reason; other exceptions → FAILED. Clean and readable. ✓
+
+`_talk_bindings(profiles)`: 
+```python
+def _talk_bindings(raw):
+    """旧 character_profiles 里只有台词部分进新设置（一行「角色=台词」），其余是运行时状态。"""
+    if not isinstance(raw, Mapping): raise NotMappable(...)
+    lines = []
+    for name, prof in raw.items():
+        phrases = _phrases_of(prof)
+        for line in phrases:
+            lines.append(f"{name}={line}")
+    if not lines: raise NotMappable("character_profiles 里没有可搬的台词（其余属于运行时状态）")
+    return "\n".join(lines)
+
+def _phrases_of(prof):
+    if isinstance(prof, Mapping):
+        for key in ("phrases", "lines", "texts", "台词", "utterances"):
+            v = prof.get(key)
+            if isinstance(v, (list, tuple)): return [str(x) for x in v if str(x).strip()]
+        return []
+    if isinstance(prof, (list, tuple)): return [str(x) for x in prof if str(x).strip()]
+    return []
+```
+Good, documented as best-effort (real data is empty).
+
+`_background(raw, root)` as designed, with `when=_modern_bg` / `_legacy_bg`:
+```python
+def _chat_style(root) -> str: return str(root.get("chat_ui_style") or "modern").strip().lower()
+def _modern_bg(root) -> bool: return _chat_style(root) != "legacy"
+def _legacy_bg(root) -> bool: return _chat_style(root) == "legacy"
+```
+And the `when` reason string: I'll add a `when_reason: str` field to To for a good message. `when=` + `when_reason="当前 chat_ui_style 是 modern，背景取自 modern_chat_background"`.
+
+Now `_negate`:
+```python
+def _negate(raw): return not _as_bool(raw)
+```
+
+`_island_info_mode`:
+```python
+def _island_info_mode(raw):
+    token = str(raw or "").strip().lower()
+    if token in ("balance", "balance_tier"): return "time"   # 余额功能已砍 → 回落到时间
+    return raw
+```
+
+Now, `To.key` for expand rows is "" → the Item key comes from the produced dict keys. For `when`-failed/reject rows with key=="" I need a display key. I'll use the source path or a joined list. Let me have `To.label_key` = key or "（多个键）". For bg rows, key="" and multiple keys → the item key will be "chat_background_mode" as the primary if I set `key="chat_background_mode"`. Let me just set the `key` field on expand rows to the primary target key (used for messaging) while `produce` returns the full dict. So `To(expand=_background, key="chat_background_mode", when=..., ...)`. And `produce` when expand is set ignores `key` for output but uses it for display. Then `To.targets` for the schema-existence test = [key] + can't know expand outputs statically. For the schema test I'll check `to.key` when set, and additionally run the expand functions on the real-ish samples to check outputs (covered by behaviour tests). I'll note that.
+
+Alright. Also for the `{provider}` rows: the missing-provider case. Implement in the plan:
+```python
+if "{provider}" in path and not plan.provider:
+    item = Item(source, to.key or path, UNMAPPED, reason="无法确定 provider（chat.active_provider 与 providers 都缺）")
+```
+and mark consumed.
+
+`_active_provider(cfg)`:
+```python
+def _active_provider(cfg):
+    pid = cfg.get("chat") ...
+    chat = cfg.get("chat") if isinstance(cfg.get("chat"), Mapping) else {}
+    pid = str(chat.get("active_provider") or "").strip()
+    providers = chat.get("providers") if isinstance(chat.get("providers"), Mapping) else {}
+    if pid and pid in providers: return pid
+    if len(providers) == 1: return next(iter(providers))
+    return pid
+```
+
+Now let me write the code. I'll be systematic. Also add `format_text` and `main(argv)` for the CLI? cli.py's `_cmd_migrate` will import from migrator. I'll put the arg handling in cli.py (consistent with other commands) and expose `run(argv)`? cli.py's `_delegate` pattern uses a module `main(extra)`. But migrate is a first-class command there. I'll implement `_cmd_migrate(args)` in cli.py calling `migrator.migrate(...)` + `migrator.format_text(...)`, mirroring `_cmd_doctor`. ✓
+
+Let me write migrator.py now. Long file (~700 lines). Let's go.
+
+For the settings file: which settings items get reported when the legacy key is absent? Not reported. The counts then reflect only the keys that exist in the legacy data. I'll also report `sources` (which legacy files were found/missing).
+
+One more decision: `report.settings_items` — I want a deterministic order. I'll append in the order rows are processed: pass1 in MAPPING order (config, wechat, dock as declared in MAPPING dict) then pass2. Then sort? For a readable report I'll sort by status order then key. Let me keep the natural order (mapping table order = logical grouping) — that's more readable in console. For JSON, same order. ✓
+
+Writing now. I'll also handle `Settings.load()` when the settings file exists but is corrupt → report.created False, values default. Fine.
+
+Let me write the file.
+
+For memory copy: `shutil.copy2(src, dst)`; ensure `dst.parent.mkdir(parents=True, exist_ok=True)`. Also `paths.ensure_dirs()`? That creates secrets/cache/logs dirs too — harmless but it does write dirs in dry-run. Avoid in dry-run. I'll only mkdir the target parent when actually copying.
+
+Now about `changed` → `st.save()`. Track via plan.changed. Also: should I save settings if `dry_run` is False but no changes? No.
+
+Edge: if settings.json doesn't exist and there are zero settings migrations but we do have state/memory → don't create settings.json. ✓ (plan.changed only set on a real write).
+
+Now the secrets: writing via `st.set("api_key", v)` modifies the settings store but NOT `_values`, so no need to save. ✓ And it doesn't set plan.changed. Right — secrets don't require a settings save.
+
+Let me write.
+
+```python
+_STATUS_LABEL = {
+    MIGRATED: "已迁移", ALREADY: "已存在", SKIPPED: "跳过", FAILED: "失败",
+    DEFAULT: "等于默认值", UNMAPPED: "无对应新键",
+}
+_STATUS_ICON = {MIGRATED: "✓", ALREADY: "=", SKIPPED: "-", FAILED: "✗", DEFAULT: "·", UNMAPPED: "?"}
+```
+
+`format_text(report, *, verbose=False, color=False)` — no color (Windows console). Keep plain.
+
+Report text layout. Let me write it.
+
+Let me write the whole module now.
+
+Regarding `Item.value` for secrets — never store the secret value in the Item (it would end up in the report/JSON!). Use `"***"` or omit. I'll store `value="<hidden>"`. Important for requirement 5 (密钥绝不落盘) and to avoid leaking keys into terminal/JSON output. I'll set value=None for secret items and add note "值已隐藏". ✓
+
+Writing the file now. Also the `present` call at the end.
+
+Let me also double check `Settings.set` signature returns (bool, str). ✓
+
+And `Field.coerce` for CHOICE with a float input: `str(0.5)` = "0.5" ✓. For `playback_speed` 2.0 → "2.0" ✓ (choice "2.0" exists). For a legacy scale of `0.72` (float) → "0.72" ✓. But what if legacy has `scale: 1` (int)? → str(1) = "1" → not in choices → coerce error → FAILED. Hmm, legacy config had 0.5 (float). JSON `1.0` parses as float → "1.0" ✓. If someone hand-wrote `1`, it'd fail. Acceptable (reported as FAILED with a clear reason). Could add leniency: for CHOICE, try formatting numbers as floats when the raw is a number: I'll add a small `_choice_text` convert for numeric-valued choices (scale, playback_speed, menu_radius) that normalizes int→str(float) so 1 → "1.0" and 12 → "12". Hmm, menu_radius choices are "8","12","16","18" (ints) while scale/playback are floats. A generic normalizer: if raw is a number and `str(raw)` not in choices, try `str(float(raw))`. I could apply this to the three numeric-choice keys via a convert `_num_text`:
+```python
+def _num_text(raw):
+    """旧值是 JSON 数字、新键是枚举字符串（scale/playback_speed/menu_radius）。"""
+    if isinstance(raw, bool): return raw
+    if isinstance(raw, (int, float)):
+        text = str(raw)
+        return text
+    return raw
+```
+That doesn't help. The real leniency needed: `1` → `"1.0"`. Which happens only for hand-edited files. `str(12)` = "12" ✓ works for menu_radius. So the only risky case is a float-valued choice written as an int. I'll add `_choice_num`:
+```python
+_CHOICE_NUM_KEYS = {"scale", "playback_speed"}
+def _choice_text(raw):
+    if isinstance(raw, bool): return raw
+    if isinstance(raw, int): return str(float(raw))   # 1 → "1.0"（枚举里存的是浮点写法）
+    return raw
+```
+and apply `convert=_choice_text` to `scale` and `playback_speed` only. menu_radius gets plain (int 12 → "12" ✓ via coerce). Good — precise, documented.
+
+Hmm, is this over-engineering? It's 6 lines and prevents a real (if unlikely) mis-migration. Keep it.
+
+Now write. Also note: `character` is TEXT — legacy "shenshen" == default ✓.
+
+One more: `self_talk_texts` legacy is a LIST → MULTILINE coerce joins with "\n" ✓ (non-default → migrated).
+
+`proactive_screen.whitelist` list [] → MULTILINE "" == default → DEFAULT ✓.
+
+`wechat.whitelist` list of 4 → joined ✓ migrated.
+
+`tts.fallback` list ["sapi","edge","gsv"] → "sapi\nedge\ngsv" == default ✓ DEFAULT.
+
+OK, writing now.
+
+Let me write out the final file content.
+
+def legacy_dir_default:
+```python
+def default_legacy_dir() -> Path:
+    override = os.environ.get(ENV_LEGACY_DIR, "").strip()
+    if override: return Path(override).expanduser()
+    appdata = os.environ.get("APPDATA", "").strip()
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / LEGACY_DIR_NAME
+```
+
+Report summary text for the "no data" case: I'll add `report.has_legacy_data` and a constant message in the CLI.
+
+Let me write the code now — final.
+
+Also: for `_load_json`, return (value, problem). I'll return None and append to problems from the caller.
+
+Now writing for real.
+
+```python
+def migrate(*, legacy_dir=None, settings=None, store=None, dry_run=False, force=False) -> MigrationReport:
+    legacy = Path(legacy_dir).expanduser() if legacy_dir else default_legacy_dir()
+    data = paths.data_dir()
+    report = MigrationReport(legacy_dir=legacy, data_dir=data, dry_run=dry_run, force=force)
+
+    if store is None and settings is not None:
+        store = getattr(settings, "_secrets", None)   # 见 docstring：测试必须与 Settings 用同一个存储
+    if store is None:
+        store = SecretStore()
+    if settings is None:
+        settings = Settings(secrets=store)
+    settings.load()
+
+    sources: dict[str, Mapping] = {}
+    for name, filename in (("config", "config.json"), ("wechat", "wechat.json"), ("dock", "dock.json")):
+        path = legacy / filename
+        report.sources[name] = path.is_file()
+        if not path.is_file(): continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            report.problems.append(f"{filename} 无法读取或解析（{exc}），已跳过该文件")
+            continue
+        if not isinstance(raw, Mapping):
+            report.problems.append(f"{filename} 顶层不是对象，已跳过该文件")
+            continue
+        sources[name] = raw
+
+    plan = _Plan(report=report, settings=settings, store=store, legacy=legacy, sources=sources, dry_run=dry_run, force=force)
+    _migrate_settings(plan)
+    _migrate_state(plan)
+    _migrate_secrets(plan)
+    _migrate_memory(plan)
+
+    if plan.changed and not dry_run:
+        try: settings.save()
+        except OSError as exc: report.problems.append(...)
+    report.executed = bool(plan.changed) and not dry_run
+    return report
+```
+Wait: `report.executed` should mean "真的落了盘". plan.changed only tracks settings writes. State/memory/secrets writes also count. I'll set `plan.wrote = True` in each write path and use that.
+
+Let me finalize and write the file.
+
+For counting: `report.counts()` aggregates settings+state+secret items + memory item. I'll include dropped/unmapped separately (not in counts, or in counts as their own keys?). The CLI prints `migrated N / already N / skipped N / failed N / default N / unmapped N`. Let me include unmapped (from the unmapped bucket + dropped) in the counts too, so the total = 所有被检查的旧键. I'll compute counts over ALL items (settings + state + secrets + memory + unmapped + dropped). That gives one coherent statistics table. ✓
+
+Then "迁移了多少项 / unmapped 多少项" is directly readable.
+
+Let me write it.

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 本地运行产物
+.bench/
+.shadow/
+logs/
+*.flag
+
+# 参考资料与私有工作区（不随仓库分发）
+.refs/
+.tools/
+.workbuddy/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

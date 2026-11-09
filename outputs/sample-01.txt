@@ -1,0 +1,1551 @@
+OK. So role.rs's task directives are different text from the stage DIRECTIVE_*. No dedup possible.
+
+I'm now fairly convinced the estimated savings are unrealistic. But hold on — let me reconsider the possibility that the intended refactor 1 is much more aggressive: making the **fallback path use the task path**. Hmm, but golden stage/* hashes must stay identical...
+
+WAIT. Hold on. Let me re-read: "**验收**：对拍台里 `stage/Routing|Setup|Forge|Polish|Modify` 五个场景**逐字节不变**". If the fallback path were replaced entirely (e.g., routing fallback gets a WriteChapter-like task), the stage/* hashes WOULD change. So no.
+
+Hmm, unless the golden test's stage/* entries are just `build_stage_block(skills, stage)` calls, which stay. Yes! The golden test calls build_stage_block directly. So build_stage_block must keep producing the same bytes for all 5 stages. So the refactor must preserve build_stage_block's output exactly. Confirmed.
+
+So, refactor 1's real savings ~10. OK. Let me now think about whether the "net lines must decrease" can be met while adding ~70 lines of tests.
+
+Options: make tests compact. Let me plan the tests to be lean:
+
+Test A (build_run_materials characterization): needs a temp dir with 4 files, a snapshot, and the literal. ~35 lines including the literal.
+
+Test B (script_key four cases): ~15 lines.
+
+Test C (queue dedup): ~14 lines.
+
+Total ~64 lines. Savings needed: at least ~65.
+
+Refactor 3 saves ~20 (deleting 2 of 3 functions).
+Refactor 1 saves ~10.
+Queue dedup costs ~+10.
+Refactor 2 saves ~5.
+
+Total ≈ −15 net vs +64 tests → net +49. FAILS the "净行数必须减少" requirement.
+
+Hmm. So either my savings estimates are way off, or the author's expectation includes something I'm not seeing. Let me look at stage.rs once more for a big win. 2293 lines. Let me scan the sections:
+
+1-88: skeleton/config
+90-96: consts
+98-122: Stage enum
+124-186: StageSnapshot + derive
+188-289: StageProfile + profile + build_stage_block + load_system_materials + load_one_material  ← refactor 1 target
+291-427: TaskBlockInput + build_task_block  ← refactor 1 target
+429-771: queue ledger (~340 lines!)
+774-778: hub_doc
+780-827: facts_of, chapter_draft_present
+829-896: chapter_key, chapter_ids_in, normalize_chapter_token
+898-995: build_run_materials, progress_block  ← refactor 2 target
+997-1101: asset_impact_line, constraint_conflict, design_line, config_line, chapter_after, read_queue_progress, read_plan
+1103-1169: parse_plan, extract_chapter_block, block_ranges, block_id, tail_state, read_chapter, chapter_file
+1171-1209: compact_history
+1211-1264: budget consts + estimate
+1266-1363: BudgetOutcome, apply_context_budget
+1365-1538: folding/digest machinery
+1540-1583: chapter_id_of_path + the 3 key functions  ← refactor 3 target
+1585-1596: written_chapter_id, read_asset_mode
+1598-1612: uses_character_cards
+1614-1747: ChapterCheck, check_written_chapter, chapter_of_write, check_chapter
+1749-1783: declared_cast, appearing_cast
+1785-1833: update_assets_gap, missing_assets_of_written
+1835-1882: chapter_shape_problems
+1884-2293: tests (~410 lines)
+
+Hmm, nothing else obvious. 
+
+Wait... maybe the task intends the tests I add to be counted but expects much bigger refactors. Let me reconsider: is there really a big duplication in the queue ledger section? 340 lines for the queue. Hmm, the task doesn't ask to refactor that (only the dedup bug).
+
+Hmm, hold on. Let me re-read the task statement once more:
+
+"你在 Windows 上的仓库... 做三处等价重构（只减行、不改行为）"
+"收尾: 三处都做完后，报出 stage.rs（以及你动过的其它文件）的前后行数；净行数必须减少。某处若减不动（比如抽公共机器反而更长），如实报"不值得做"并回退那一处，不要硬凑。"
+
+"净行数必须减少" — this could reasonably mean the net of the three refactors (excluding mandated new tests). I think the practical interpretation: report the numbers honestly; the refactors' net must be negative; if one is not worth it, revert it and say so. The mandated tests (which the task itself requires) are not part of "硬凑".
+
+Hmm, but a strict reading of "stage.rs 前后行数；净行数必须减少" would be violated. I could resolve this by reporting both: total file lines (including tests) and refactor-only delta. And I should try to make the total net negative if feasible.
+
+Hmm, can I make the total net negative? Let me think... If refactors save ~35 and tests cost ~64, I'm +29. To get net negative I'd need to find another ~30 lines of savings.
+
+Is there anything else in stage.rs that's a fair "只减行不改行为" cleanup within the scope? The task says three refactors + the queue dedup. I shouldn't invent extra refactors... though the spirit is "only reduce lines, don't change behavior". Hmm, but adding unrequested refactors risks breaking things and violates "只改这三处"? It says "只改 src-tauri/src/ai_service/skill_agent/stage.rs" — file restriction, not "only these three changes". But it's presented as three specific refactors.
+
+Alternatively: keep tests compact. Could the build_run_materials characterization test be smaller? The literal is the bulk. Let me design the package so the output is short:
+
+```rust
+#[test]
+fn run_materials_are_byte_identical() {
+    let dir = std::env::temp_dir().join(format!("lingchat-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(AGENT_DIR)).unwrap();
+    std::fs::write(dir.join(DESIGN_REL_PATH), "# 设计稿\n\n## 第1章 · 甲\nid: 01\n").unwrap();
+    std::fs::write(dir.join(CHAPTER_DETAILS_REL_PATH), "## 第1章 · 甲\n正文\n").unwrap();
+    std::fs::write(dir.join(CONSTRAINTS_REL_PATH), "- 素材模式：先预留\n").unwrap();
+    std::fs::write(dir.join(QUEUE_JSON_REL_PATH), "[]").unwrap();
+    let snap = StageSnapshot { stage: Stage::Setup, script_dir: Some(dir.clone()), plan: vec!["01".into()], written: vec!["01".into()], ..Default::default() };
+
+    assert_eq!(build_run_materials(&snap, Path::new(".")), "...");
+}
+```
+Hmm, `data_dir` matters: `missing_assets_of_written` (only when written non-empty) → `validate::check_chapter_assets(data_dir, dir, id, &value)` — if written is non-empty, this runs and reads the chapter file... `chapter_file(dir, id)` → resolve_chapter_file... For the Setup stage, `build_run_materials` returns the design block + progress_block. progress_block with written=["01"] would call missing_assets_of_written → needs Chapters/01.yaml → not found → skip. That's fine, returns empty. But it might panic or hit data_dir? `check_chapter_assets` with a nonexistent data_dir — only called if the chapter file resolves. Let me keep it simple: make `written` non-empty but no chapter files, so `missing_assets_of_written` iterates and `chapter_file` returns None → `continue`. Safe.
+
+Hmm, but `uses_character_cards`: cast mode = Unspecified (from constraints "素材模式：先预留" only) → snap.script_key: default None → `std::fs::read_dir(script_dir.join("characters"))` → Err → false. So no cast line. Good, deterministic.
+
+`config_line`: dir.join("story_config.yaml") missing → "剧本配置：缺（系统会补一份最小骨架，能打开但不是成品）".
+`design_line`: present with plan ["01"] → "设计稿：1 章（01）".
+`read_queue_progress`: read queue.json → "[]" → empty → None. Hmm, the task says include queue.json in the package. I could make queue.json contain one Open item to exercise that branch. `render_text` uses kind.label()... JSON entry: {"mark":"Open","kind":"outline","target":"02","registered_at":123}. That would produce "队列：还欠 1 项（下一项：编写剧本：02）。..." — a long line. Good coverage. Let's include it (the older `[outline@...]` view? no, read_state parses queue.json).
+
+Stage: Setup with written non-empty → the "下一章" line? `chapter_after(snap)`: next_chapter = first plan id not in written → plan ["01","02"], written ["01"] → "02"; idx=1; plan.get(2) → None → chapter_after None → no line. Good, keeps it simple.
+
+Let me pick: stage Setup, plan ["01","02"], written ["01"], design with two chapters, chapter-details present, constraints "先预留", queue.json with 1 open item "outline/02".
+
+Expected output:
+```
+\n\n【现有设计稿】\n{design.trim_end()}
+```
+then progress_block:
+```
+\n\n【落盘进度】\n
+- 素材模式：先预留（`.agent/constraints.md` 是唯一来源；要改就改那一行，并检查别处有没有旧说法）\n
+- 剧本配置：缺（系统会补一份最小骨架，能打开但不是成品）\n   (wait: order!) 
+```
+Order in progress_block: lines = [素材模式, (角色卡模式?), (⚠️冲突?), config_line, (design_line if is_file||written non-empty), (章节细节稿 if is_file), 已落盘, (asset_impact if written non-empty && missing non-empty), (下一章), (队列)].
+
+With written non-empty and no chapters on disk → missing is empty → no asset line.
+So: 素材模式, 剧本配置, 设计稿, 章节细节稿, 已落盘, 队列.
+
+The literal will be maybe 8 lines. The test ~20 lines of code + 8 lines of literal. Fine, ~30 lines.
+
+OK so tests total ~30 + 15 + 14 = ~59 lines.
+
+Savings: refactor3 −20, refactor1 −10, refactor2 −5, queue −(-10)=... 
+
+Hmm. What if I make the queue dedup not add 10 lines but fold it into existing code with fewer lines? The requirement says "约 10 行" for the dedup. E.g., in `archive_queue_done`:
+```rust
+    let mut entries = read_state(dir, QUEUE_DONE_JSON_REL_PATH);
+    // 同一 (kind, target, mark) 只留一行：一轮里每做完一项都用同一份 plan 重写一次账，
+    // 而已归档的项已经从状态里搬走 → 会被重新登记、再写一条重复的归档行。
+    for e in closed {
+        if !entries.iter().any(|old| old.kind == e.kind && old.target == e.target && old.mark == e.mark) {
+            entries.push(e.clone());
+        }
+    }
+```
+That replaces `entries.extend(closed.iter().cloned());` (1 line) with ~6 lines → +5. Plus the test ~14 lines. Total +19.
+
+Hmm.
+
+So total: −35 (refactors) + ~59 (tests) + 5 (dedup code) = +29 lines. Net increase. That fails "净行数必须减少" if tests count.
+
+Therefore I need to reconsider. Either:
+(1) The author accepts reporting refactor-only deltas, or
+(2) My savings estimates are too pessimistic, or
+(3) The tests I write should be much more compact.
+
+Hmm, wait. Maybe the tests could be compact by REUSING existing test helpers. The existing `queue_tests` module has `tmp_dir`, `item`, `done_of`, `queue_of`. My queue dedup test can go in `queue_tests` and reuse those → ~10 lines. The build_run_materials test and script_key test could go into `facts_tests` (existing module) → reuse nothing much.
+
+Hmm what about: are the three mandated additions really ~59 lines? build_run_materials test: I could make it a smaller package (fewer files) — but the task requires design.md + chapter-details.md + constraints.md + queue.json. The literal could be shortened by using a minimal design.
+
+Let me estimate again with a tight test:
+```rust
+    /// `build_run_materials` 的输出（进 messages，不在对拍台覆盖范围内）：整段钉成字面量，
+    /// 合并重复读盘时**一个字都不许变**。
+    #[test]
+    fn run_materials_are_byte_identical() {                                       1
+        let dir = tmp_dir("run-materials");                                       2
+        std::fs::write(dir.join(DESIGN_REL_PATH), "# 设计稿\n\n## 第1章 · 甲\nid: 01\n").unwrap();   3
+        std::fs::write(dir.join(CHAPTER_DETAILS_REL_PATH), "## 第1章 · 甲\n正文\n").unwrap();       4
+        std::fs::write(dir.join(CONSTRAINTS_REL_PATH), "- 素材模式：先预留\n").unwrap();             5
+        std::fs::write(dir.join(QUEUE_JSON_REL_PATH), "[]").unwrap();                               6
+        let snap = StageSnapshot {                                                                  7
+            stage: Stage::Setup,                                                                    8
+            script_dir: Some(dir.clone()),                                                          9
+            plan: vec!["01".into()],                                                                10
+            written: vec!["01".into()],                                                             11
+            ..Default::default()                                                                    12
+        };                                                                                          13
+
+        assert_eq!(                                                                                 14
+            build_run_materials(&snap, Path::new(".")),                                             15
+            "\n\n【现有设计稿】\n# 设计稿\n\n## 第1章 · 甲\nid: 01\n\
+             \n\n【落盘进度】\n\
+             - 素材模式：先预留（`.agent/constraints.md` 是唯一来源；要改就改那一行，并检查别处有没有旧说法）\n\
+             - 剧本配置：缺（系统会补一份最小骨架，能打开但不是成品）\n\
+             - 设计稿：1 章（01）\n\
+             - 章节细节稿：在（.agent/chapter-details.md）—— 落盘时的细节以它为准，跟设计稿的梗概有出入就当场对齐\n\
+             - 已落盘：01\n"                                                            16-22
+        );                                                                               23
+    }                                                                                    24
+```
+~24 lines. Note `tmp_dir` creates `.agent/` dir. And `queue.json` = "[]" → no queue line. Hmm, I wanted to exercise the queue branch but "[]" is fine; let me instead put one Open entry to cover `read_queue_progress` (which refactor 2 touches? No, refactor 2 doesn't touch it — actually the task mentions queue.md as one of the re-read files, but read_queue_progress is a single read). I'll include a queue entry for coverage — it's 1 line of code + 1 line of expected text. Let's do `[{"mark":"Open","kind":"outline","target":"02","registered_at":1790000000}]` → expected line: `- 队列：还欠 1 项（下一项：编写剧本：02）。这里列的就是还没做完的：用户说了不用做、或者已经改口做别的，说一声就行，别去改队列文件（那是渲染出来的，改了不生效）`. That's long but it's one line. Good coverage of `render_text`/`Mark` parsing. Worth it.
+
+Hmm, careful: with plan ["01"] and written ["01"] → stage Setup but plan non-empty... doesn't matter, build_run_materials only uses snap.stage.
+
+Wait, one important check: does `Stage::Setup` + design non-empty produce the 【现有设计稿】 branch? Yes (`Stage::Setup | Stage::Modify if !design.is_empty()`).
+
+OK ~25 lines.
+
+script_key test ~16 lines:
+```rust
+    /// 路径 → 剧本包 key：三类锚点（`.agent/` / `Chapters/` / `story_config.yaml`）合一后，
+    /// 四种典型路径的结果一字不变。
+    #[test]
+    fn package_key_derivation_is_unchanged() {                              1
+        let p = |tail: &str| format!("/data/game_data/scripts/{tail}");     2
+        assert_eq!(script_key_of(&p("standalone/甲/story_config.yaml"), &[]).as_deref(), Some("standalone/甲"));  3
+        assert_eq!(script_key_of(&p("character/乙/丙/.agent/design.md"), &[]).as_deref(), Some("character/乙/丙")); 4
+        assert_eq!(script_key_of(&p("standalone/丁/Chapters/01.yaml"), &[]).as_deref(), Some("standalone/丁"));  5
+        assert_eq!(script_key_of("/data/other/notes.md", &[]), None);       6
+        // 锚点认不出的散文件：退回"已知剧本包列表"最长匹配
+        let known = vec!["character/乙".to_string(), "character/乙/丙".to_string()];  7
+        assert_eq!(script_key_of(&p("character/乙/丙/notes.md"), &known).as_deref(), Some("character/乙/丙")); 8
+        assert_eq!(script_key_of(&p("character/乙/notes.md"), &known).as_deref(), Some("character/乙")); 9
+    }                                                                       10
+```
+~12 lines. And it needs a "before" version using the two existing functions:
+```rust
+        assert_eq!(script_key_of_package_path(...), ...)  // pre-refactor
+```
+The pre-refactor test will use `script_key_of_package_path` + `script_key_of_story_config` + `script_key_of_script_path`. Fine, similar length.
+
+queue dedup test in queue_tests ~10 lines:
+```rust
+    /// 一轮里每做完一项都用同一份 plan 重写一次账：已归档的项不能因为"又登记了一次"再写一条。
+    #[test]
+    fn archived_item_is_not_written_twice() {                       1
+        let dir = tmp_dir("archive-dedup");                         2
+        let turn = registered_before_now();                         3
+        write_chapter_file(&dir, "03");                             4
+        let items = vec![item(TaskKind::WriteChapter, "03")];       5
+        write_queue(&dir, &items, false, turn).unwrap();            6
+        write_queue(&dir, &items, false, turn).unwrap();            7
+        assert_eq!(done_of(&dir).matches("转成 YAML：03").count(), 1, "{}", done_of(&dir));  8
+    }                                                               9
+```
+~9 lines. 
+
+Total tests ≈ 25 + 12 + 9 = 46 lines.
+
+Refactor savings: need > 46 + 5 (dedup code) = 51. Hmm.
+
+Not achievable with my current estimates (~35). I'm ~16-20 short.
+
+Let me dig for more savings honestly.
+
+Hmm, wait. Let me reconsider refactor 2 more ambitiously, since the task says −30~50. What if I move ALL of `progress_block`'s fact-gathering into the snapshot? Let me look for genuine line savings there.
+
+Actually, let's reconsider. What does `derive` do? reads design (plan) + chapter ids. Then `build_run_materials` reads design + constraints + queue + chapter-details metadata + design metadata. `progress_block` reads constraints (twice via ScriptModes::read and constraint_conflict), design (again), chapter-details (metadata), queue.json.
+
+What if I restructure `progress_block` to take a small "facts" struct read once in `build_run_materials`?
+```rust
+/// 交接单要盘上的事实：一次读完，后面各段只消费。
+struct RunFacts { design: Option<String>, constraints: Option<String>, modes: ScriptModes, queue: Option<String> }
+```
+Then:
+- `constraint_conflict(dir)` → `script_modes::conflict_note(&constraints_text)` — needs the constraints text; `ScriptModes::read(dir)` → could stay as a read... but if RunFacts holds `constraints`, then modes = `ScriptModes::parse(&text)` (uses the public `parse`!) — that eliminates the second constraints.md read: currently `ScriptModes::read(dir)` reads the file, and `constraint_conflict(dir)` reads it again. With RunFacts: read constraints once (`Option<String>`), then `ScriptModes::parse(&text)` — wait, currently `ScriptModes::read` uses `unwrap_or_default()` on read failure → default modes. `ScriptModes::parse(&text_or_empty)`: parse("") → asset: parse_asset_mode("") = Unspecified, cast: Unspecified = default. Same! Good, exactly equivalent.
+
+So progress_block becomes:
+```rust
+let modes = ScriptModes::parse(&constraints);  // constraints: &str (empty if missing)
+```
+and constraint_conflict becomes `script_modes::conflict_note(&constraints).map(...)` — wait, `conflict_note` returns Option<String> already; currently `constraint_conflict(dir)` = `read_to_string(dir.join(CONSTRAINTS_REL_PATH)).ok()?` then `conflict_note(&text)`. With facts: `if let Some(note) = script_modes::conflict_note(&constraints) { lines.push(format!("⚠️ {note}")) }` — and `constraint_conflict` (4 lines) can be DELETED.
+
+Savings: `constraint_conflict` −4, and `config_line(dir)` → could take the config text? That's story_config.yaml, read once already (1 read, no dup). `design_line` −0 (param change), `read_plan` −5, `read_queue_progress(dir)` → could take the queue state... it's read once (`read_state`), not duplicated.
+
+Also `ChapterCheck`/`check_chapter` etc. read design/consteaints again, but those are in `tools.rs` call paths (check_written_chapter), not in derive/build_run_materials. Not our target.
+
+Total refactor 2 savings: read_plan (−5), constraint_conflict (−4), design_line read removal (−0/+2 for Option), build_run_materials read (0/+1 with cache), progress_block +1 param, RunFacts struct +? 
+
+Hmm, introducing a RunFacts struct costs lines (~8). Better: just pass individual &str params:
+```rust
+fn progress_block(snap: &StageSnapshot, dir: &Path, data_dir: &Path, design: Option<&str>, constraints: &str) -> String
+```
+and in build_run_materials:
+```rust
+    let design = snap.design.clone().or_else(|| std::fs::read_to_string(dir.join(DESIGN_REL_PATH)).ok());
+    let constraints = read_or_empty(&dir.join(CONSTRAINTS_REL_PATH));
+    ...
+    out.push_str(&progress_block(snap, dir, data_dir, design.as_deref(), &constraints));
+```
+Hmm, wait: if I go the "cache in snapshot" route, the `or_else` fallback keeps the hand-built test green. But do I even need the snapshot field? Without it: `build_run_materials` reads design.md once itself (1 read) instead of 3 (its own + design_line's). derive's read stays separate. Savings: design_line's read. So no snapshot field needed at all, −3 reads → −2 reads.
+
+Full plan for refactor 2 (no snapshot field):
+```rust
+pub fn build_run_materials(snap: &StageSnapshot, data_dir: &Path) -> String {
+    let Some(dir) = snap.script_dir.as_deref() else { return String::new() };
+    // 事实层只读一次：设计稿与约束卡在本函数里各读一次，往下传文本（`progress_block` 不再重读）。
+    let design = std::fs::read_to_string(dir.join(DESIGN_REL_PATH)).ok();
+    let constraints = read_or_empty(&dir.join(CONSTRAINTS_REL_PATH));
+    let text = design.as_deref().unwrap_or_default();
+    let mut out = match snap.stage { ... uses text ... };
+    out.push_str(&progress_block(snap, dir, data_dir, design.as_deref(), &constraints));
+    out
+}
+```
+Savings:
+- `read_plan` fn: −5 (derive calls `parse_plan(&text)`)? Hmm, but derive's own read is still there:
+```rust
+let plan = std::fs::read_to_string(script_dir.join(DESIGN_REL_PATH)).map(|t| parse_plan(&t)).unwrap_or_default();
+```
+That's 1 line replacing `let plan = read_plan(&script_dir);` → −4 with read_plan deleted (−5 +1) = −4.
+- `design_line` signature + body: param `Option<&str>`; body: `let Ok(text) = ...` (3 lines) → `let Some(text) = design else { return ... };` (3 lines)? Actually:
+```rust
+fn design_line(design: Option<&str>) -> String {
+    let Some(text) = design else {
+        return "设计稿：缺（还没有 .agent/design.md）".to_string();
+    };
+    let plan = parse_plan(text);
+```
+vs current:
+```rust
+fn design_line(dir: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(dir.join(DESIGN_REL_PATH)) else {
+        return "设计稿：缺（还没有 .agent/design.md）".to_string();
+    };
+    let plan = parse_plan(&text);
+```
+Same count (4 body lines). −0.
+- `progress_block`: `let modes = ScriptModes::read(dir);` → `let modes = ScriptModes::parse(constraints);` same 1 line. `if let Some(note) = constraint_conflict(dir)` → `if let Some(note) = script_modes::conflict_note(constraints)` same 1 line. So progress_block changes only its signature (+2 params, same line count).
+- `constraint_conflict` deleted: −4.
+- `config_line(dir)` — keep.
+- build_run_materials: +2 lines (design, constraints, text).
+- `let mode = ScriptModes...`? 
+
+Net: −4 (read_plan) −4 (constraint_conflict) +2 −0 = −6. 
+
+Total across refactors: −10 (r1) −6 (r2) −20 (r3) = −36. Plus dedup code +5, tests +46 → net +15. STILL positive.
+
+Hmm. Need ~15 more.
+
+OK let me reconsider. Maybe I should question my refactor-1 estimate and find a way to genuinely save 30+ there by restructuring more aggressively. Let me think about what shared machine could be *bigger*.
+
+Idea: The two "materials intro + materials" steps and the directive step can be one function that both call, AND — importantly — `profile` + `build_stage_block` could be refactored so that `build_stage_block` is *smaller* by having the intro string live in the `StageProfile`... no, that doesn't save lines.
+
+Alternative idea: move `load_one_material` INTO the shared function `push_materials` — i.e., merge `load_one_material` (18 lines) into `push_materials` (5 lines) → one function of ~18 lines. Saves ~5 lines. Hmm, but load_one_material is also called... only from the two loops. If push_materials is the only caller, merging is fine:
+```rust
+/// 逐份读入手册并追加（冠以「角色指令」来源头）。读不到必须让模型看见：只打日志它会凭记忆补规范。
+/// 两条装配路径（按任务 / 按阶段）共用这一处。
+fn push_materials(out: &mut String, skills_dir: &Path, materials: &[&str]) {
+    for rel in materials {
+        let path = skills_dir.join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => { out.push_str(&format!("\n\n【角色指令 · {}】\n", rel)); out.push_str(text.trim_end()); },
+            Err(_) => { tracing::warn!(...); out.push_str(&format!(...)); },
+        }
+    }
+}
+```
+~17 lines vs load_one_material (18) + push_materials (5) = 23. Saves 6.
+
+Then build_task_block's materials branch:
+```rust
+    let materials = task.materials();
+    if materials.is_empty() {
+        out.push_str("（本轮是仅对话…）");
+    } else {
+        out.push_str("\n\n以下技能文档是本轮…");
+        push_materials(&mut out, skills_dir, materials);
+    }
+```
+Saves 2 (loop → call).
+
+And build_stage_block: 
+```rust
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {
+    let profile = profile(stage);
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());
+    push_directive(&mut out, profile.directive);
+    out.push_str("\n\n以下技能文档是本阶段…（3-line literal）");
+    push_materials(&mut out, skills_dir, profile.system_materials);
+    out
+}
+```
+vs current 15 + load_system_materials 7 = 22 → new: 12 (8 body + literal lines) → saves ~10 there... let me be careful: current:
+```
+247 fn                                              1
+248 let profile                                      2
+249 let mut out                                      3
+250 if !directive.is_empty() {                      4
+251  out.push('\n');                                 5
+252  out.push_str(profile.directive);                6
+253 }                                                7
+254 out.push_str(                                   8
+255-257 literal (3 lines)                           9-11
+258 );                                              12
+259 out.push_str(&load_system_materials(...));       13
+260 out                                              14
+261 }                                                15
+```
+Wait, let me recount the actual literal lines 254-258:
+```
+254:    out.push_str(
+255:        "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\
+256:         \n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，\
+257:         需要时仍用 read_skill 加载。",
+258:    );
+```
+Yes, 5 lines (254-258). So build_stage_block = 15 lines (247-261): fn, profile, out, if(4 lines: 250-253? let me recount:
+247 `pub fn build_stage_block(...) -> String {`
+248 `    let profile = profile(stage);`
+249 `    let mut out = format!(...);`
+250 `    if !profile.directive.is_empty() {`
+251 `        out.push('\n');`
+252 `        out.push_str(profile.directive);`
+253 `    }`
+254-258: out.push_str( ...5 lines...)
+259 `    out.push_str(&load_system_materials(skills_dir, stage));`
+260 `    out`
+261 `}`
+= 15 lines.
+
+New:
+```rust
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {      1
+    let profile = profile(stage);                                          2
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());              3
+    push_directive(&mut out, profile.directive);                            4
+    out.push_str(                                                           5
+        "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\     6
+         \n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，\  7
+         需要时仍用 read_skill 加载。",                                        8
+    );                                                                      9
+    push_materials(&mut out, skills_dir, profile.system_materials);         10
+    out                                                                     11
+}                                                                           12
+```
+= 12 lines. Saves 3 vs 15, plus load_system_materials (7 lines) removed = −10. But push_directive (6 lines) added = −4 net. Hmm, unless I inline the directive push... no, it's shared with build_task_block (which saves 4 there).
+
+Let me do the full accounting for refactor 1:
+
+REMOVED: build_stage_block 15 + load_system_materials 7 + load_one_material 18 = 40
+ADDED: build_stage_block 12 + push_materials(merged with load_one_material) 17 + push_directive 6 = 35
+Savings in build_task_block: directive 5 lines → 1 (−4); materials loop 3 → 1 (−2)
+Net: 40 − 35 + ... wait: new total = 35, old total for those = 40, and build_task_block saves 6. Net −11.
+
+Hmm, −11. Plus if I keep the intro literal in build_task_block (it's already inline, unchanged).
+
+What if push_directive isn't worth it (6 lines for 2 call sites saving 4+4=8)? Net −2. Keep it.
+
+OK so refactor 1 = −11. r2 = −6. r3 = −20. Sum = −37. Dedup +5, tests +46 → +14. 
+
+Hmm. Still positive. I need another ~15.
+
+Ideas to trim test lines: 
+- The build_run_materials test: could I avoid the temp-dir setup by reusing `tmp_dir` from queue_tests? It's in a different module (`queue_tests`). Both are `#[cfg(test)] mod` inside the same file — `facts_tests` can't use `queue_tests::tmp_dir` unless it's `pub(super)`... Actually `super::queue_tests::tmp_dir` is accessible if the fn is not private? Items in a module are private to it, so `queue_tests::tmp_dir` isn't accessible from `facts_tests` unless `pub(crate)` or `pub(super)`. I could put the new run-materials test INSIDE `queue_tests` (it has tmp_dir + PathBuf import + Path via `super::*`). The task says "这条断言放在 stage.rs 现有测试模块里" — any existing test module is fine. Putting it in `queue_tests` (bad naming) or adding `pub(super)` to tmp_dir... Simpler: put the new test in `facts_tests` but add a tiny local tmp helper there? That's +5 lines. Or move `tmp_dir` up... 
+
+Alternative: put it in `queue_tests` and rename nothing. `queue_tests` already has `use super::*;` and `tmp_dir`. Hmm, semantically it's a "facts" test. I could rename the module... no, keep it simple: put the run-materials test in `facts_tests` and reuse... hmm.
+
+Actually, wait! `facts_tests` has its own inline temp dir creation already (in `draft_present_matches_by_chapter_number`): 4 lines:
+```rust
+let dir = std::env::temp_dir().join(format!("lingchat-draft-{}", std::process::id()));
+let _ = std::fs::remove_dir_all(&dir);
+std::fs::create_dir_all(dir.join(AGENT_DIR)).unwrap();
+```
+And `queue_tests::tmp_dir` does the same. There's test-only duplication but that's not worth touching.
+
+Let me just add the run-materials test to `facts_tests` with 4 lines of setup (6 with writes). Fine, ~25 lines total.
+
+Hmm. So I still need ~15 lines.
+
+Alternative thought: maybe the queue dedup can be done in fewer lines than +5? 
+
+```rust
+fn archive_queue_done(dir: &Path, closed: &[QueueEntry]) -> std::io::Result<()> {
+    if closed.is_empty() { return Ok(()); }
+    let mut entries = read_state(dir, QUEUE_DONE_JSON_REL_PATH);
+    entries.extend(closed.iter().cloned());
+    if entries.len() > QUEUE_DONE_KEEP { entries.drain(..entries.len() - QUEUE_DONE_KEEP); }
+    ...
+```
+Dedup within this function:
+```rust
+    let mut entries = read_state(dir, QUEUE_DONE_JSON_REL_PATH);
+    // 同一 (kind, target, mark) 只留一行：一轮里每做完一项都用同一份 plan 重写一次账，
+    // 已归档的项已从状态里搬走，不挡一下会被重新登记、再写一条重复的归档行。
+    entries.retain(|old| !closed.contains(old));
+    entries.extend(closed.iter().cloned());
+```
+Using `Vec::contains` with `QueueEntry: PartialEq` (it derives PartialEq) — that's (kind, target, mark, registered_at) equality. Hmm, that's stronger than (kind,target,mark). The spec says (kind,target,mark). With registered_at also equal (same turn → same `now`), the retain would drop it. But if the same item is completed in a *later* turn (different registered_at), `contains` wouldn't match and a new line WOULD be appended — which is arguably desirable (each turn's completion gets its own line) and still fixes the reported bug (same turn duplicate). Hmm, but the spec explicitly says dedupe by (kind,target,mark). 
+
+The bug scenario: same turn, same registered_at → identical entries → `retain(|old| !closed.contains(old))` fixes it in ONE line! And it's semantically "don't append an entry that's already in the archive". Hmm, but is it what's asked? "请按 (kind, target, mark) 去重后再写归档（约 10 行）" — they want (kind,target,mark). With contains-equality, a later turn re-doing the same item appends a duplicate line, which per their spec should be deduped. 
+
+I'll follow the spec (kind, target, mark) but write it compactly:
+```rust
+    let mut entries = read_state(dir, QUEUE_DONE_JSON_REL_PATH);
+    // 归档里已有的 (kind, target, mark) 不再写第二行：一轮里每做完一项都用同一份 plan 重写一次账，
+    // 而已有结论的项已从状态里搬走，挡不住就会被重新登记、再写一条重复的归档行。
+    entries.extend(closed.iter().filter(|e| !entries_has(&entries, e)).cloned());
+```
+Hmm, borrow issue: `entries` borrowed immutably inside `extend` on `entries` — that won't compile (mutable borrow in extend receiver + immutable borrow in closure). Need:
+```rust
+    let fresh: Vec<QueueEntry> = closed.iter().filter(|e| !entries.iter().any(|o| same(o, e))).cloned().collect();
+    entries.extend(fresh);
+```
+That's 2 lines + a helper `same` (3 lines) = 5-6 lines. Or inline:
+```rust
+    let dup = |o: &QueueEntry, e: &QueueEntry| o.kind == e.kind && o.target == e.target && o.mark == e.mark;
+    let fresh: Vec<_> = closed.iter().filter(|e| !entries.iter().any(|o| dup(o, e))).cloned().collect();
+    entries.extend(fresh);
+```
+3 lines (with a closure). Plus doc comment 2 lines. Total +5. OK.
+
+So: +5 for dedup code, +9 test, +25 run-materials test, +12 key test = +51. Refactors −37. Net +14.
+
+Hmm. I need to find 15+ more lines of reduction to satisfy "净行数必须减少" (if tests count).
+
+Options:
+(a) Trim the tests further. E.g., merge the run-materials assertions into fewer lines? The literal must be complete. Could use `concat!`? Not fewer lines.
+(b) Find more reduction.
+
+Hmm, let me look at refactor 3 again — can I delete more? The three functions are 35 lines (1549-1583 including doc comments). A merged version:
+
+```rust
+/// 从写入路径反推剧本包 key —— 三类锚点（`.agent/` / `Chapters/` / `story_config.yaml`）认包根，
+/// 认不出来再按"已知剧本包列表"最长匹配（包根下的散文件走这条）。三种调用点共用这一个入口。
+///
+/// 不能只按"已知剧本包"匹配：新建剧本的中间态"只有 `.agent/design.md`、还没建工程"认不出来
+/// → 会话不绑 script_key → `derive` 退化成 Routing、整套自检失效（真机踩过）。
+pub fn script_key_of(path: &str, known: &[String]) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let (_, tail) = normalized.split_once("/scripts/")?;
+    for anchor in ["/.agent/", "/Chapters/"] {
+        if let Some((root, _)) = tail.split_once(anchor) {
+            if !root.is_empty() {
+                return Some(root.to_string());
+            }
+        }
+    }
+    if let Some(root) = tail.strip_suffix("/story_config.yaml") {
+        if !root.is_empty() {
+            return Some(root.to_string());
+        }
+    }
+    // 包根下的散文件（如 `.../scripts/character/乙/丙/notes.md`）：按已知包名最长匹配
+    known
+        .iter()
+        .filter(|k| normalized.contains(&format!("/scripts/{}/", k.trim_matches('/'))))
+        .max_by_key(|k| k.len())
+        .cloned()
+}
+```
+That's ~24 lines vs 35 → −11 only. Hmm, less than I hoped because the merged function carries both behaviors.
+
+Careful with `max_by_key(|k| k.len())` — the original sorts by Reverse(len) and takes the first match; with `sort_by_key` (stable), ties keep the original order (earliest in `keys`). `max_by_key` returns the LAST maximum on ties. Hmm: for equal-length keys, different result possible if both match. Can two different keys of equal length both match `/scripts/{key}/`? Yes: `.../scripts/a/b/...` with keys "a/b" and... hmm, equal-length different keys both matching the same path? The match requires the literal substring `/scripts/<key>/`. Two distinct keys of the same length that are both substrings at different positions: e.g. path `/scripts/x/scripts/y/f` with keys "x" and "y" (both length 1). Both match → original returns the first in `keys` order. `max_by_key` returns the last. To preserve exactly, use `.find()` after computing the max length, or iterate in order tracking the best:
+```rust
+    let mut best: Option<&String> = None;
+    for k in known {
+        if normalized.contains(&format!("/scripts/{}/", k.trim_matches('/')))
+            && best.is_none_or(|b| k.len() > b.len())
+        {
+            best = Some(k);
+        }
+    }
+    best.cloned()
+```
+Hmm, `is_none_or` requires Rust 1.82+. Let me check the toolchain/edition. Alternatively:
+```rust
+    let longest = known.iter().filter(|k| normalized.contains(&format!("/scripts/{}/", k.trim_matches('/')))).map(|k| k.len()).max()?;
+    known.iter().find(|k| k.len() == longest && normalized.contains(&format!("/scripts/{}/", k.trim_matches('/')))).cloned()
+```
+Ugly. Or keep the sort (it's 2 lines):
+```rust
+    // 最长匹配优先；同长度取 `keys` 里靠前的那个（与原实现一致）
+    let mut keys: Vec<&String> = known.iter().collect();
+    keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    keys.into_iter().find(|k| normalized.contains(&format!("/scripts/{}/", k.trim_matches('/')))).cloned()
+```
+That's 4 lines (vs the original 5) — preserving stable-sort tie semantics. Good.
+
+Total merged function ≈ 27 lines vs 35 → −8. Hmm, less than 20. The three originals:
+- story_config: 6 lines (1549-1554)
+- script_key_of_script_path: 8 lines (1556-1564)
+- script_key_of_package_path: 14 lines (1566-1583)
+= 28 lines of code + 3 doc comments... the counts include doc comments. Total 1549-1583 = 35 lines.
+
+Merged: doc comment (4) + fn (2 + 12 + 4 + 2 = ~24) = 28. So −7. Hmm!
+
+That's disappointing. Unless I keep the known-list fallback OUT of the merged function by having db.rs pass... no, db needs it.
+
+Hmm, alternatively: merged function without the known-list (anchors + story_config only, i.e. exactly package_path), and db.rs keeps calling the two-step: `script_key_of(path, &[])` or known... no.
+
+Hmm, what if db.rs's fallback could be dropped? Let's look: db.rs derives the script key from historical write paths. If anchors cover `.agent/`, `Chapters/`, `story_config.yaml`, what write path would the model produce that's NOT under those? E.g. writing `characters/角色卡.md` into the package (the skill mentions characters/), or `.agent/` nested? Or assets? Hmm, the package might contain `assets/` or `characters/`. If the model writes `/scripts/character/甲/characters/乙.md`, anchors fail → known-list saves it. So the fallback has real value. Keep it.
+
+OK. So my total honest reduction is ~−37 to −40, and mandated tests+dedup add ~+51. Net positive ~+11.
+
+Hmm, I'm uneasy. Let me reconsider the run-materials test size — maybe I can make it much smaller by choosing a minimal package:
+- design.md: "# 设计稿\n" (no chapters → plan empty) → but then design_line gives the "在，但读不出章节" long message. Hmm.
+- Actually I could skip chapter-details? The task says create it. Keep.
+
+What if I use Stage::Routing or Stage::Modify? Routing → no design block, just progress. Hmm, but Modify/Setup exercises the design block. The output literal is ~8 lines; that's the bulk. I think ~25 lines for that test is near-minimal.
+
+Alternatively — could the mandated tests be folded into existing tests? E.g., add the build_run_materials assertion INSIDE an existing test? That would save the setup lines (reuse the package built by an existing test)... but existing tests don't build design+details+constraints+queue together. Hmm.
+
+What about a shared test helper: add `fn package_dir(tag) -> PathBuf` in a test module and use it for both the run-materials test and the script_key test? The script_key test doesn't need a dir (pure string paths). Hmm.
+
+OK, alternative approach to satisfy the line requirement: accept the honest numbers and report clearly that stage.rs's *total* grew by N lines because of the mandated tests (25+12+9=46) and the dedup, while the three refactors net −37; i.e., report both. But the instruction explicitly says "净行数必须减少" — a hard requirement. Hmm. "三处都做完后，报出 stage.rs…的前后行数；净行数必须减少。某处若减不动…如实报"不值得做"并回退那一处，不要硬凑。" — I read this as: the refactors must net-decrease; if a refactor can't decrease, revert it. The tests are mandated by the same document, so they're not "凑".
+
+Hmm, hmm. But a strict reader would say the file must shrink.
+
+Let me think whether there's a legitimate way to get the file to shrink overall. What if the new tests replace/absorb existing weaker assertions? E.g. the existing `registers_judgeable_item_once` test already writes twice and asserts `text.matches("转成 YAML：03").count() == 1` — but it checks queue.md (open), not queue-done.md. My new test checks queue-done.md. Could I EXTEND the existing test with 1-2 lines instead of a new 9-line test? E.g. add to `registers_judgeable_item_once`:
+```rust
+        // 已归档的项不该因为"又登记了一次"再写一条重复的归档行
+        assert_eq!(done_of(&dir).matches("转成 YAML：03").count(), 1, "{}", done_of(&dir));
+```
+But wait: in that test, the chapter file is NOT created, so the item stays Open (no archive). I need the Done case: `landing_item_written_after_registration_is_done` creates the chapter before registering and asserts the archive has one line. I could extend THAT test with a second `write_queue(&dir, &items, false, turn)` and assert still one line:
+```rust
+    #[test]
+    fn landing_item_written_after_registration_is_done() {
+        let dir = tmp_dir("landing-done");
+        write_chapter_file(&dir, "03");
+        let turn = registered_before_now();
+        let items = vec![item(TaskKind::WriteChapter, "03")];
+        write_queue(&dir, &items, false, turn).unwrap();
+
+        let done = done_of(&dir);
+        assert!(done.contains("- [x] [write_chapter@"), "{done}");
+        // 一轮里每做完一项都用同一份 plan 重写一次账：已归档的项不该再写第二条
+        write_queue(&dir, &items, false, turn).unwrap();
+        assert_eq!(done_of(&dir).matches("转成 YAML：03").count(), 1, "{}", done_of(&dir));
+    }
+```
+That's +4 lines to an existing test instead of a new 9-line test. Saves 5 lines. But the task says "并加一条用例：同 (kind,target) 连续写两次 write_queue，queue-done.md 里只有一行" — "加一条用例" = add a test case. Extending an existing test isn't "一条用例". Hmm. I'd rather add the dedicated test (following instructions literally) — it's clearer evidence. But hmm, +9.
+
+OK you know what? Let me reconsider the whole "tests count toward net lines" question by looking at the actual instruction once more: "报出 stage.rs（以及你动过的其它文件）的前后行数；净行数必须减少。" 
+
+I'll aim to make the total net negative, and if I can't do it honestly, I'll report precisely: refactor net vs total. Let me try harder for savings.
+
+More savings candidates in stage.rs that are within the three refactors:
+
+Refactor 1 extended idea: since `build_stage_block` and `build_task_block` share the "directive + intro + materials" tail, what if the shared function also absorbs the `【职责边界】` + handoff for the task path? No...
+
+Hmm, what about `TaskBlockInput` construction? No.
+
+Refactor 2 extended idea: what other files does `progress_block` re-read that derive already read?
+- `read_state(dir, QUEUE_JSON_REL_PATH)` in read_queue_progress — 1 read, no dup.
+- `chapter_file`/`read_chapter` in the Forge branch — legit.
+So no.
+
+What about `facts_of` (line 782-815) reading design metadata and chapter-details? It's called from core's reconcile, separate path.
+
+Hmm, what about `design_line` + the `is_file()` check: `if dir.join(DESIGN_REL_PATH).is_file() || !snap.written.is_empty()`. With the Option design passed in, I could write `if design.is_some() || ...` — since `read_to_string().ok()` is None iff the file is unreadable/missing. is_file() true for a directory... negligible. Saves 0 lines though.
+
+OK, radical idea to genuinely cut lines: since the tests are mandated and the refactors are small, maybe I can find a fair, behavior-preserving consolidation *within the scope of the three refactors* that I've been too conservative about. Let me look at refactor 2's neighborhood for other "read the same file twice" spots:
+
+`check_chapter` (line 1725): `let design = std::fs::read_to_string(dir.join(DESIGN_REL_PATH)).unwrap_or_default();` — reads design again. It's called from `check_written_chapter` ← tools.rs. Not in the derive/build_run_materials path, but it IS "又读一遍同样的文件" and the task says "事实层只算一次". Hmm, but it's a different call site (a tool call, later in time). Not a duplicate within one call. Skip.
+
+What about `read_asset_mode(script_dir)` (line 1594-1596) = `ScriptModes::read(script_dir).asset` — reads constraints.md. Called from `check_chapter`. Again a separate path.
+
+Hmm OK.
+
+Let me look at this from a completely different angle: maybe I'm wrong that the author's estimates are unreachable, because maybe they intend `build_stage_block` to be expressed *through* the same function as `build_task_block`, with the stage profile converted into a "task-like" input, thereby deleting *the entire* `build_stage_block` + `load_system_materials` + intros... but bytes must match. Impossible.
+
+Fine. Let me now consider: is there duplication between `build_task_block`'s body and something else that could be shared, e.g. `build_run_materials`'s 【落盘进度】? No.
+
+Alright, decision: I'll do the three refactors + the dedup + the mandated tests, and I'll ALSO look for safe line reductions in the immediate neighborhoods of the three refactors (not inventing unrelated changes) to get the total net negative. Specifically:
+
+Extra safe reduction candidates near refactor 1/2/3:
+(i) `read_or_empty` (675-677, 3 lines) — used in several places; keep.
+(ii) `chapter_file` (1167-1169, 3 lines) — thin wrapper; used 4 times; keep.
+(iii) `read_chapter` (1161-1165, 5 lines) — used once (Forge branch). Could inline: 
+```rust
+let tail = tail_state(&chapter_file(dir, prev).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default());
+```
+That's uglier and 1 line vs 1 line + 5. Saves 5. Hmm, it's behavior-identical. But it makes the call site long. Risky for "只搬动与合并" spirit? It IS a merge (removing a single-use helper). But it's outside the three named refactors... The task's铁律 is "只搬动与合并，不改字符" — behavior-preserving. I'd rather not invent.
+
+Hmm, hold on. Let me reconsider the "净行数必须减少" scope once more. Practically, the grader (parent agent) will diff stage.rs and check that it shrank. If it grew by 10 lines because of 46 lines of mandated tests... they'd likely accept if I explain. But the instruction is explicit.
+
+Let me try to make the tests tighter — target ~30 lines total instead of 46:
+
+Test 1 (run materials): Can I write it as a single assert with a compact literal? Maybe:
+
+```rust
+    /// `build_run_materials` 的输出（走 messages、不在对拍台覆盖内）：整段钉成字面量 ——
+    /// 事实层合并读盘时**一个字都不许变**。
+    #[test]
+    fn run_materials_text_is_unchanged() {
+        let dir = tmp_dir("run-materials");
+        write(&dir, DESIGN_REL_PATH, "# 设计稿\n\n## 第1章 · 甲\nid: 01\n");
+        ...
+    }
+```
+Still verbose. 
+
+What if I put the expected literal in a `const` next to the test and use a compact chain? e.g.
+```rust
+        let out = build_run_materials(&snap, Path::new("."));
+        assert_eq!(out, EXPECTED_RUN_MATERIALS);
+```
+with `const EXPECTED_RUN_MATERIALS: &str = "...";` — same lines.
+
+Hmm what about using `include_str!`? No, don't create files.
+
+I think ~24 lines for test 1, ~12 for test 2, ~9 for test 3 = 45. It is what it is.
+
+To offset: find ~50 lines of honest reduction. Current plan gives ~37. Need ~13-15 more.
+
+Let me revisit refactor 3's merged function to be as tight as possible, and consider whether the known-list fallback can be *kept* in db.rs while the merged function handles it via a single implementation... 
+
+Actually, here's a thought: `script_key_of_script_path` does longest-match on `known`; `script_key_of_package_path` does anchors. What if the merged function is structured as a chain of attribute checks and I count:
+
+```rust
+/// 路径 → 剧本包 key。三类锚点（`.agent/` / `Chapters/` / `story_config.yaml`）认包根，
+/// 包根下的散文件再按"已知剧本包列表"最长匹配。三个调用点（绑定 / 归属反推 / 外来包拦截）共用它。
+///
+/// 不能只按"已知剧本包"匹配：新建剧本的中间态"只有 `.agent/design.md`、还没建工程"认不出来
+/// → 会话不绑 script_key → `derive` 退化成 Routing、整套自检失效（真机踩过）。
+pub fn script_key_of(path: &str, known: &[String]) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let (_, tail) = normalized.split_once("/scripts/")?;
+    if let Some(root) = ["/.agent/", "/Chapters/"]
+        .iter()
+        .find_map(|a| tail.split_once(a).map(|(root, _)| root))
+        .filter(|root| !root.is_empty())
+    {
+        return Some(root.to_string());
+    }
+    if let Some(root) = tail.strip_suffix("/story_config.yaml").filter(|r| !r.is_empty()) {
+        return Some(root.to_string());
+    }
+    // 包根下的散文件：按已知包名最长匹配（同长度取 `known` 里靠前的，与原实现一致）
+    let mut keys: Vec<&String> = known.iter().collect();
+    keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    keys.into_iter()
+        .find(|k| normalized.contains(&format!("/scripts/{}/", k.trim_matches('/'))))
+        .cloned()
+}
+```
+Hmm ~24 lines with doc. Original 35. −11. 
+
+Ohh wait. Actually — what about `chapter_id_of_path` (1540-1547)? Not part of the three. Skip.
+
+Hmm, let me reconsider: is the doc comment on `script_key_of_story_config` etc. removable? I'd consolidate 3 doc comments (3+2+5=~9 lines with blank lines) into one (~4 lines). Already counted.
+
+OK so realistic total: r1 −11, r2 −6, r3 −11, dedup +5, tests +45 → net +22. NOT negative. 
+
+I need to either (a) accept and explain, or (b) find ~22 more lines.
+
+Let me look ONE more time for a big, legitimate, behavior-preserving consolidation in the areas the task names. 
+
+... 
+
+Hmm! Wait a moment. Refactor 1 says "让 build_stage_block 复用" the common machine. What if the common machine is defined over BOTH the directive and the boundary and the materials, and `build_task_block` is *also* restructured so that its tail (directive + boundary + handoff + materials) becomes a single shared helper used by the fallback too? The fallback needs: directive, boundary(None), materials — in the order: directive, materials, then boundary appended by core.rs. Since core.rs appends the boundary AFTER, and the task path puts it BEFORE the materials... the ordering differs, so one helper can't do both unless the helper takes the boundary note position...
+
+Actually WAIT. What if I make the shared machine emit: directive + boundary + handoff + intro + materials, where for the stage path: directive(non-empty) + boundary("") + handoff("") + intro_stage + materials. But that would ADD a 【职责边界】 section to build_stage_block's output → changes bytes for stage/*. No.
+
+Unless... hmm, what if the fallback's boundary (added by core.rs) is exactly preserved by having the shared machine NOT emit the boundary, and core.rs keeps appending it. Yes, that's my plan.
+
+OK, so what if I move core.rs's 3 lines into stage.rs as part of the shared machine, i.e. `build_fallback_block(skills_dir, stage)` = stage block + boundary? Then stage.rs gains 3-4 lines but core.rs loses 4 and the *total repo* shrinks... but stage.rs itself grows. The task says "报出 stage.rs（以及你动过的其它文件）的前后行数；净行数必须减少" — maybe "净" refers to the total across touched files! That's a plausible reading: report stage.rs and any other touched files, and the *net* must decrease. If I touch core.rs (−4 +1 call = −3), tools.rs (−4), db.rs (−2), those add up.
+
+Hmm! Interesting. Let's compute the total:
+- stage.rs: −11 (r1) −6 (r2) −11 (r3) +5 (dedup) +45 (tests) = +22
+- tools.rs: call sites: 
+  - `stage::script_key_of_package_path(path)?` → `stage::script_key_of(path, &[])?` (same 1 line)
+  - `stage::script_key_of_story_config(path).or_else(|| stage::script_key_of_package_path(path))` (2 lines) → `stage::script_key_of(path, &[])` (1 line) → −1
+- db.rs: `script_key_of_package_path(path).or_else(|| script_key_of_script_path(path, &known))` (4 lines) → `script_key_of(path, &known)` (1-2 lines) → −2
+
+Total other files: −3. Still +19.
+
+Not enough. Hmm.
+
+OK, alternative: reduce the test burden by making the run-materials assertion *shorter* through a smaller package and a shorter output. Let me design for the shortest meaningful output:
+
+Package: design.md only + empty chapter-details + constraints + queue.json? The task requires all four files created. The output length is dominated by progress_block's fixed lines (7 lines, some very long).
+
+Could I use `Stage::Routing` (no design block) to shorten by 2 lines? But then the design.md content wouldn't be exercised in the Setup/Modify branch. Hmm, the point is to pin `build_run_materials`'s output; using Routing (empty stage → `_ => String::new()`) exercises less. Use Modify? same as Setup.
+
+What if the design is just "# 设计稿\n" (no chapters)? Then `design_line` → "设计稿：在，但读不出章节 —— 每个 `##` 标题后的**第一个非空行**必须写 `id: 01`…" (2 lines in source, 1 line output). And the Setup branch → `【现有设计稿】\n# 设计稿`. plan=[] → written must be [] to keep stage consistency? build_run_materials doesn't care about stage consistency. With plan [] and written [], progress_block: `if dir.join(DESIGN_REL_PATH).is_file() || !snap.written.is_empty()` → true → design_line. `已落盘：（无）`. No queue. Fine — slightly shorter output (no 已落盘：01? it's there anyway).
+
+I think the realistic test size is what it is: ~24 lines.
+
+Hmm, let me reconsider: maybe I'm over-thinking. Since the task's rule is explicit and I can't meet it, the right move per the instructions is: "某处若减不动（比如抽公共机器反而更长），如实报'不值得做'并回退那一处，不要硬凑。"
+
+So: if refactor 1 turns out to be roughly line-neutral (+/−3), I should REVERT it and report "不值得做". Similarly refactor 2 if ~−6 (well, −6 is a decrease; it's worth keeping? "减不动" means can't reduce). Refactor 3 at −11 is a real decrease.
+
+But then the net would be even worse (+33).
+
+Hmm hmm. Unless... hmm.
+
+Hold on, hold on. Let me reconsider the line-count premise. Maybe the tests don't need to be that long because the mandating text expects them to be small ("这条断言放在 stage.rs 现有测试模块里，不要新建脚手架文件" — to keep it small). And maybe the author expects the refactors to save 110-160. Since they don't, the honest outcome is: stage.rs grows a bit due to tests. I should report this transparently with exact numbers: e.g. "三处重构净 −28 行；加上任务要求的 3 条表征用例（+45）与去重实现（+5），文件总行数 2293 → 2315。按要求这属于'减不动'——如果你要的是文件总行数净减，需要砍测试或再找别的重构点。"
+
+That's honest and useful for the parent. But the instruction "净行数必须减少" is a hard requirement... The parent agent may care. Hmm.
+
+Let me try yet another angle: can the three mandated tests be written much more compactly by *combining* them? E.g., is there a way to have ONE test that covers both the run-materials literal and the script-key four cases? They're unrelated. But the instruction says "先加表征断言" for r2 and r3 — two assertions (could be one test fn with two parts? no, keep separate).
+
+Compact style for the key test — could be 8 lines:
+```rust
+    /// 路径 → 剧本包 key：锚点合一后四种典型路径（含"不属于任何包"）结果一字不变。
+    #[test]
+    fn script_key_from_path_is_unchanged() {
+        let p = |t: &str| format!("/data/game_data/scripts/{t}");
+        for (tail, want) in [
+            ("standalone/甲/story_config.yaml", Some("standalone/甲")),
+            ("character/乙/丙/.agent/design.md", Some("character/乙/丙")),
+            ("standalone/丁/Chapters/01.yaml", Some("standalone/丁")),
+            ("../elsewhere/notes.md", None),
+        ] {
+            assert_eq!(script_key_of(&p(tail), &[]).as_deref(), want, "{tail}");
+        }
+    }
+```
+9 lines. And the known-list case can be added as 2 more lines. ~11 lines. OK.
+
+Run-materials test: ~24. Queue dedup test: ~9. Total 44.
+
+Alright, let me try to think about whether refactor 2 can be made to save a lot more... 
+
+IDEA! What about `ChapterCheck`/`check_chapter`'s duplicated reads? No.
+
+IDEA! What about the fact that `facts_of` is called per item from core's reconcile loop, and `progress_block` re-derives things? No.
+
+Hmm, IDEA: refactor 2 could merge `derive` + `build_run_materials` file reads via the snapshot, which ALSO lets me delete `read_plan` AND make `design_line` take the text, AND delete `read_or_empty`? Let's count the snapshot variant:
+- StageSnapshot: +1 line (`pub design: Option<String>`).
+- derive: `let design = std::fs::read_to_string(script_dir.join(DESIGN_REL_PATH)).ok();` (+1, and `let plan = design.as_deref().map(parse_plan).unwrap_or_default();` changes 1 line) → +1; read_plan deleted (−5) → net −4.
+- StageSnapshot construction in derive: `design,` (+1 line) → −3.
+- build_run_materials: `let design = snap.design.clone().or_else(|| std::fs::read_to_string(dir.join(DESIGN_REL_PATH)).ok());` — hmm, that's the test-compat fallback. If instead I accept adapting the test... but the test must be green before AND after without edits. With the fallback line: build_run_materials: `let design = ...` (1 line) replacing `let design = std::fs::read_to_string(...).unwrap_or_default();` (1 line) → 0. Then `let text = design.as_deref().unwrap_or_default();` (+1). Then `progress_block(..., design.as_deref())` (same 1 line). Net +1 in build_run_materials.
+- design_line: same count.
+So snapshot variant total: r2 = −4 (read_plan) − 4 (constraint_conflict) + 1 (build_run_materials) + 1 (snapshot field) = −6. Same as before. Meh. And it adds the ugly fallback.
+
+The constraint_conflict deletion (−4) requires reading constraints once in build_run_materials and using `ScriptModes::parse` — good, that's the "constraints.md 只读一次" part.
+
+OK so r2 = −6 either way. 
+
+So my honest total is around −28 (r1 −11, r2 −6, r3 −11) and +50 for tests/dedup = +22.
+
+Hmm, let me reconsider r1 once more for a bigger cut. What if `push_materials` doesn't take `&mut String` but returns a String, and I chain? Like:
+
+```rust
+/// 「角色指令」段落的装配机器：行为要求（空则不注入）+ 引言 + 逐份手册全文。
+/// 两条装配路径（按任务 / 按阶段）共用；只有引言文案不同。
+fn instruction_tail(skills_dir: &Path, directive: &str, intro: &str, materials: &[&str]) -> String {
+    let mut out = String::new();
+    if !directive.is_empty() {
+        out.push('\n');
+        out.push_str(directive);
+    }
+    out.push_str(intro);
+    for rel in materials { read_one(&mut out, skills_dir, rel); }   // or inline
+    out
+}
+```
+Count: 11 lines. And then:
+- build_stage_block: 
+```rust
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {
+    let profile = profile(stage);
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());
+    out.push_str(&instruction_tail(skills_dir, profile.directive, STAGE_INTRO, profile.system_materials));
+    out
+}
+```
+7 lines + const STAGE_INTRO 4 lines = 11 + instruction_tail 11 = 22 vs current 15+7 = 22. Even. And build_task_block:
+- directive (5 lines) + boundary + handoff + materials branch... hmm, in the task path the directive is pushed BEFORE the boundary and handoff, and materials come LAST. So `instruction_tail` (directive+intro+materials contiguous) can't be used wholesale for the task path! Only directive and (intro+materials) separately. Damn.
+
+So for the task path I need two pieces: directive push, and materials push. Two helpers. Which is what I had:
+- push_directive: 6 lines
+- push_materials: 5-17 lines
+
+To minimize: 
+```rust
+/// 行为要求（空的不注入）—— 两条装配路径共用。
+fn push_directive(out: &mut String, directive: &str) {
+    if !directive.is_empty() {
+        out.push('\n');
+        out.push_str(directive);
+    }
+}
+```
+6 lines. Used by build_stage_block (saves 4 lines) and build_task_block (saves 4 lines) → net −2.
+
+```rust
+/// 逐份读入手册全文（缺失的照样注入"缺失"提示）—— 两条装配路径共用。
+fn push_materials(out: &mut String, skills_dir: &Path, materials: &[&str]) {
+    for rel in materials {
+        out.push_str(&load_one_material(skills_dir, rel));
+    }
+}
+```
+5 lines, saves 2 in build_task_block and replaces load_system_materials (7) in build_stage_block → net −4.
+Then `load_one_material` (18 lines) stays. 
+
+So r1 = −2 (directive) −4 (materials) + ... and build_stage_block itself: 
+```rust
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {
+    let profile = profile(stage);
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());
+    push_directive(&mut out, profile.directive);
+    out.push_str(
+        "\n\n以下技能文档…\
+         \n…\
+         …",
+    );
+    push_materials(&mut out, skills_dir, profile.system_materials);
+    out
+}
+```
+= 11 lines vs 15 → −4. Plus load_system_materials deleted (−7). So r1 = −4 −7 −2 −4 + 6 + 5 = −6. Hmm, now I get −6 (I previously computed −11 by merging load_one_material into push_materials, which saves another 5).
+
+If I merge load_one_material into push_materials: −5 more → r1 = −11. Let's do that (single read-material machine = literally "抽出两者共用的机器（读材料…）").
+
+So r1 = −11.
+
+OK. Let me now consider trimming the tests to ~35 lines and see: −28 + 5 + 35 = +12. Still positive. 
+
+Ugh.
+
+Hmm, let me look at the problem from the "what would a reasonable reviewer accept" angle. The tests are explicitly required. Any honest implementation of this task will grow stage.rs unless the refactors save >50. The author believed they'd save 110-160. They save ~30. So the task as specified has an internal inconsistency; the instruction even anticipates this ("某处若减不动…如实报不值得做并回退那一处").
+
+Given "不要硬凑" (don't pad), the best I can do:
+1. Do all three refactors properly.
+2. Add the mandated tests.
+3. Report exact numbers, note the discrepancy between estimate and reality, and report the refactor-only delta (negative) vs total (positive due to mandated tests).
+4. Optionally choose to fold test 3 into the existing landing test to save lines... no, keep as instructed.
+
+Hmm, but hold on. Let me re-read this line once more: "三处都做完后，报出 stage.rs（以及你动过的其它文件）的前后行数；净行数必须减少。"
+
+Maybe I can satisfy it by moving the tests OUT of stage.rs into... no: "这条断言放在 stage.rs 现有测试模块里，不要新建脚手架文件" — mandated in stage.rs.
+
+OK. Alternatively, maybe I can find a legitimate ~25-line reduction elsewhere in stage.rs that is squarely within the spirit ("只搬动与合并，不改字符"), e.g., in the test module itself: the test module has duplication (3 places create temp dirs). Consolidating test helpers is "只搬动与合并" and reduces lines without changing behavior:
+
+- `queue_tests::tmp_dir` (7 lines) + `facts_tests` inline temp dir creation (4 lines in `draft_present_matches_by_chapter_number`). If `tmp_dir` were accessible from facts_tests... I'd need `pub(super)`? Both modules are siblings inside stage.rs; `queue_tests::tmp_dir` private → not accessible. I could move `tmp_dir` to a shared test module... that's "新建脚手架" (forbidden-ish, though it says don't create new *files*).
+
+Hmm.
+
+What about the queue_tests helpers: `queue_of`, `done_of` (thin wrappers). Meh.
+
+Honestly, I don't want to invent unrelated refactors. The task said three refactors; doing extra ones could be seen as scope creep and risks breaking things. But the "净行数必须减少" requirement... 
+
+Hmm, wait wait wait. Let me re-read the refactor 2 brief one more time:
+
+"`StageSnapshot::derive(script_key)` 已经读过盘（`plan`、`written`、`script_dir`），而 `build_run_materials` / `progress_block` **又读一遍同样的文件**（`design.md`、`chapter-details.md`、`queue.md`、`constraints.md`）。**改法**：把重复的读盘合并成一次（可以把读到的文本挂在快照或参数里传下去），**输出文本一字不变**。"
+
+Note: chapter-details.md is checked with `is_file()` in progress_block and read in `chapter_draft_present` — hmm.
+
+And what about `queue.md`? `QUEUE_REL_PATH` markdown — "代码只写不读". And `queue.json` read via read_state in progress_block. `derive` doesn't read queue.json. So "queue.md" is likely a slip for queue.json, which is read once. Unless... `build_run_materials` → progress_block reads queue.json, and `write_queue` also reads it — different call path.
+
+So the only real duplicate is design.md (3 reads) and constraints.md (2 reads). My plan handles both. Good. Estimated savings remain ~−6 to −10.
+
+Hmm, one more: what if I ALSO store the constraints text in the snapshot? Then... no, derive doesn't read constraints.
+
+OK, final answer on approach. Let me be pragmatic and maximize honest savings:
+
+For r2, let me do a fuller "facts read once" restructure that touches progress_block's per-line reads:
+- `config_line(dir)` reads story_config.yaml — read once, fine.
+- `design_line(dir)` reads design.md — merged.
+- `constraint_conflict(dir)` reads constraints.md — merged (ScriptModes::parse).
+- `dir.join(DESIGN_REL_PATH).is_file()` — merged into `design.is_some()`.
+- `dir.join(CHAPTER_DETAILS_REL_PATH).is_file()` — could pass... it's a single metadata call, keep.
+
+Savings from `is_file()` → `design.is_some()`: 0 lines (just a shorter expression, possibly fewer wrapped lines!). Actually `if dir.join(DESIGN_REL_PATH).is_file() || !snap.written.is_empty() {` might exceed 100 chars? It's currently on one line (line 947) — 62 chars. With `design.is_some() || !snap.written.is_empty()` — shorter. Fine, 0 lines but cleaner.
+
+So r2 ≈ −6. Accept.
+
+Let me now also reconsider: maybe I should double-check whether `derive`'s `plan` could come from the design text passed to `build_run_materials`... it already does (snap.plan). Yes.
+
+FINE. Let me now decide the final structure and just execute. I'll target:
+
+Net reductions: r1 −11, r2 −6, r3 −11 ≈ −28, dedup +5, tests +44 → file +21.
+
+Hmm, that's a bummer for the hard requirement. Let me think about whether to instead NOT write the run-materials test as a full package...
+
+Ohh! Wait. Maybe I can put the run-materials characterization assertion into the EXISTING `queue_tests` module and reuse its `tmp_dir`, saving ~4 lines. And more importantly — hmm.
+
+Alternatively, maybe I can trim ~15 lines by making the tests reuse a new shared helper? E.g., add to `facts_tests`:
+```rust
+    /// 一个最小剧本包（设计稿 / 细节稿 / 约束卡 / 队列状态各一份），供"输出逐字不变"的表征断言用。
+    fn package(tag: &str) -> PathBuf { ... }
+```
+That's +8 lines but used once → worse.
+
+OK, decision made: I'll implement faithfully and report the numbers honestly, including that the file total grows because of the mandated tests, while the refactors themselves net negative. I'll also state clearly that if the file total must shrink, the tests would have to move to another file.
+
+Hmm, hold on. Actually, let me reconsider one thing: maybe I can satisfy both by making the tests extra compact AND finding a few more legitimate merges. Let me count the actual final numbers first, then decide whether to hunt more.
+
+Actually, let me reconsider the mandate: "**净行数必须减少**" — in the context of "三处都做完后…某处若减不动…如实报'不值得做'并回退那一处，不要硬凑", the sentence is about the refactors' net. I'm now fairly confident the intent is "the refactors must not be padding; don't add lines to fake it". The mandated tests are separate mandated work. I'll report both numbers clearly. Good.
+
+Let me now start executing. Plan of execution order (each with verification):
+
+Step 0: Add the three characterization tests FIRST (before any change) and confirm green:
+  - T1: run_materials literal (r2 guard)
+  - T2: script_key four cases using the OLD three functions (r3 guard)
+  - T3: queue-done dedup test — this one must FAIL before the fix (it's the bug). So it can't be green first. I'll add it with the fix (or add it first, see it red, then fix). Better: add T3 with the fix, and demonstrate red-before/green-after by running it once before the fix.
+  
+  Order: add T1, T2, T3 → run: T1, T2 green; T3 red (expected, documents the bug). Then do refactors 1 (verify all green), 2 (verify), 3 (verify T2 rewritten to the new entry), then the dedup fix (T3 green).
+
+  Hmm, but "每做完一处就跑一次验收" — run the full acceptance after each refactor. And if red, revert that one. T3 being red in the interim is expected (it's the bug). But the acceptance command includes `cargo test --lib` which would be red because of T3... That complicates "每做完一处就跑一次验收". 
+
+  Better order: do the dedup fix FIRST? The instruction lists it as "顺带" at the end. Hmm. But the acceptance criterion for refactors is "green". If T3 is red during refactors 1-3, I can't distinguish. 
+
+  Cleaner: 
+  a) Refactor 1 → verify green (with T1, T2 added? those are for r2/r3 guards; adding them early is good and they're green).
+     Actually T1/T2 as written for r2/r3 use old APIs and are green. Add them, run acceptance → green. 
+  b) Refactor 2 → run acceptance → green (T1 must stay green; T1 doesn't reference new params).
+  c) Refactor 3 → rewrite T2 to the new entry, run acceptance → green.
+  d) Dedup fix + T3. First add T3 alone (red, proving the bug — quick single-test run), then apply the fix, then full acceptance → green.
+     Hmm, but then T3 is red between (d1) and (d2). That's fine — it's a single step, and I'll show the red as evidence. Actually to keep every full acceptance green, I can do: apply the dedup fix + T3 together, then run acceptance green. But then I lose the "red before" evidence. I can demonstrate red-before by running just that one test with `cargo test --lib archive_dedup` after adding T3 and before the fix — a targeted run, not the full acceptance. Good: the full acceptance stays green at every checkpoint.
+
+     Even better: add T3 first, run the targeted test (red = bug documented), then apply the fix in the same step, then run full acceptance (green). 
+
+Let me reorder: 
+1. Add T1 + T2, run full acceptance → green (baseline guards are green).
+2. Refactor 1, run acceptance (fmt, fmt --check, check --all-targets, test --lib) → must be green.
+3. Refactor 2, run acceptance → green.
+4. Refactor 3 + rewrite T2, run acceptance → green.
+5. Dedup: add T3, run targeted test (expect red) → apply fix → full acceptance green.
+
+But the instruction says the run-materials assertion should be added "改之前先跑绿" — yes, step 1 covers r2 (T1) and r3 (T2). And it says "每做完一处就跑一次验收" — yes.
+
+Commits: "分三次提交（每处一次）或一次合并提交都可以". I'll do 3 commits: (1) r1, (2) r2, (3) r3 + dedup? Hmm, "每处的验收结果要能对上" — I'll do 4 commits: r1, r2, r3, dedup+去重. Actually the dedup is described as "顺带处理一个小缺陷" — I'll fold it into the third commit or a fourth. Let me do 4 commits for clarity... but the task says 3 or 1. I'll do 3 commits: r1; r2; r3+dedup. Hmm, but then T2/T1 additions need to be placed somewhere — they'd go in the commit for r2/r3 respectively. But I'm adding them up-front in the working tree before the refactors. Git commits by file (stage.rs) — I can't split within a file unless I use `git add -p`. Since all changes are in stage.rs, splitting into 3 commits requires staging hunks — feasible with `git add -p` but painful in PowerShell. Alternative: make each commit by doing the work sequentially and committing after each step (working tree accumulates only that step's changes if I commit right after each step). Yes! If I commit after each refactor step, each commit contains exactly that step's changes (plus the tests added in step 1 — which I'd put in the first commit).
+
+Plan:
+- Step 1: add T1+T2 (guards) → verify green.
+- Commit A: "test(skill_agent): 给事实层与路径推导加表征断言" (guards only). Hmm, that's a 4th commit. Or fold the guards into step 2's commit (refactor 1)? The guards belong with r2/r3. 
+
+Simplest: 
+- Commit 1: refactor 1 (+ nothing else).
+- Commit 2: refactor 2 + T1 (the run-materials guard). But T1 must be added BEFORE r2 and proven green... I can add T1, verify green, commit it as part of commit 2 (working tree has both T1 and the r2 change). The verification evidence: I ran T1 green before the r2 change (I'll note it in the commit message).
+- Commit 3: refactor 3 + T2 + dedup + T3.
+
+Hmm, that's 3 commits. That works if I'm disciplined: after adding T1 (green), immediately do r2 (still green), then commit both together. Fine. Let me structure:
+
+Step 1: add T1 & T2, run full acceptance → green (evidence: guards characterize current behavior).
+Step 2: refactor 1 → run acceptance → green. `git commit` (commit 1: r1 only — T1/T2 are unstaged changes in the same file... damn, all changes are in one file, so `git add stage.rs` stages EVERYTHING including T1/T2).
+
+Ugh. Since everything is in stage.rs, per-step commits require either `git add -p` or doing the refactors in order and committing at the end (one commit), or using a stash-like dance.
+
+Option: use `git add -p` with answers... messy. 
+
+Alternative: do the work in this order and commit 3 times using `git stash` tricks? Too messy.
+
+Pragmatic: ONE combined commit (allowed: "或一次合并提交都可以") with a clear message and per-step verification results. But then "每处的验收结果要能对上" — I'll record the per-step verification in the commit body. Hmm, "分三次提交（每处一次）或一次合并提交都可以，但每处的验收结果要能对上" — so a single commit is fine as long as I report each step's verification.
+
+Hmm, but a single commit containing r1+r2+r3+tests+dedup means the parent can't verify step-by-step... They asked for verification evidence in the report, which I'll provide with exact numbers/commands.
+
+Actually, I can do better: use `git stash push -- <file>` won't split. What about committing in 3 steps by *temporarily* reverting later changes? E.g.:
+1. Add T1+T2, verify green.
+2. Apply r1, verify, commit 1 (this includes T1+T2 — acceptable: "test guards + refactor 1").
+3. Apply r2, verify, commit 2.
+4. Apply r3 + T2 rewrite + dedup + T3, verify, commit 3.
+
+That's 3 commits, each staged fully in sequence. Each commit contains only the work done since the last commit (since I commit right after each step). Commit 1 = guards + r1. Commit 2 = r2. Commit 3 = r3 + dedup + tests. Each commit's verification is inherent. 
+
+But careful: commit 1 contains the r2/r3 guards which are fine (they're green characterization tests). Good. And T3 (red before fix) — I'll add T3 after commit 2, prove red, then fix → commit 3. Wait, T3 red would be in the working tree; if I add T3 then run the targeted test (red) and immediately fix, the final state is green. Good.
+
+Alright! Also, before committing, I must ensure the two YAML files stay untouched and not staged (`git add` only stage.rs and the other touched .rs files).
+
+Now, is `cargo fmt` going to reformat my new code in ways that break byte-identity? `cargo fmt` doesn't touch string literals (except... it doesn't reflow string literals). Good. But it might reflow `assert_eq!(build_run_materials(&snap, Path::new(".")), "...")` — the literal stays as-is. Fine.
+
+Another consideration: the file uses LF and no trailing CR. The edit tool should preserve. Also rustfmt might reformat other parts of the file? The baseline `cargo fmt --check` passed, so the file is already rustfmt-clean → `cargo fmt` will only affect my new code. Good.
+
+Now, CRITICAL: the golden test must stay green. My r1 refactor must produce byte-identical `build_stage_block` output for the 5 stages and `build_task_block` for 9 kinds × land. I'll be extremely careful with the literals. Let me write out the exact strings from the source:
+
+Stage intro (lines 254-258):
+```rust
+    out.push_str(
+        "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\
+         \n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，\
+         需要时仍用 read_skill 加载。",
+    );
+```
+Content: `"\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。" + "\n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，" + "需要时仍用 read_skill 加载。"` (the `\` + newline + leading whitespace is skipped).
+
+So the string = "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，需要时仍用 read_skill 加载。"
+
+I'll keep it exactly as-is (just moved into the shared function call or kept inline in build_stage_block). To minimize risk, I'll keep `build_stage_block` and the literals where they are, only replacing the loop/directive/helper calls. I will NOT move literals around. 
+
+Concretely, my r1 edit:
+
+Replace lines 246-289 (build_stage_block + load_system_materials + load_one_material) with:
+
+```rust
+/// 渲染阶段块（阶段名 + 行为要求 + 角色指令），拼在系统提示末尾以保前缀缓存。
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {
+    let profile = profile(stage);
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());
+    push_directive(&mut out, profile.directive);
+    out.push_str(
+        "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\
+         \n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，\
+         需要时仍用 read_skill 加载。",
+    );
+    push_materials(&mut out, skills_dir, profile.system_materials);
+    out
+}
+
+/// 一段角色指令（前导空行 + 全文）；空的不注入 —— 两条装配路径共用。
+fn push_directive(out: &mut String, directive: &str) {
+    if !directive.is_empty() {
+        out.push('\n');
+        out.push_str(directive);
+    }
+}
+
+/// 逐份读入手册全文并追加，冠以「角色指令」来源头。读不到必须让模型看见：只打日志它会凭记忆补规范。
+/// 读材料的机器只此一处，按任务与按阶段两条注入路径共用。
+fn push_materials(out: &mut String, skills_dir: &Path, materials: &[&str]) {
+    for rel in materials {
+        let path = skills_dir.join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                out.push_str(&format!("\n\n【角色指令 · {}】\n", rel));
+                out.push_str(text.trim_end());
+            },
+            Err(_) => {
+                tracing::warn!("[skill_agent] 阶段材料缺失: {}", path.display());
+                out.push_str(&format!(
+                    "\n\n【角色指令缺失 · {rel}】\n本文件读取失败。其中的规范不得凭记忆代替，\
+                     也不要静默继续；先告知用户技能文件缺失（可能需要在数据同步里重新勾选）。\n"
+                ));
+            },
+        }
+    }
+}
+```
+
+Wait — careful with the indentation inside `format!` for the 缺失 branch! Currently:
+```rust
+            out.push_str(&format!(
+                "\n\n【角色指令缺失 · {rel}】\n本文件读取失败。其中的规范不得凭记忆代替，\
+                     也不要静默继续；先告知用户技能文件缺失（可能需要在数据同步里重新勾选）。\n"
+            ));
+```
+The continuation line has leading whitespace `                     也不要静默继续；` which is SKIPPED by the `\`-newline rule (all leading whitespace after a line-continuation backslash is stripped). So the string content is `"\n\n【角色指令缺失 · {rel}】\n本文件读取失败。其中的规范不得凭记忆代替，也不要静默继续；先告知用户技能文件缺失（可能需要在数据同步里重新勾选）。\n"`. Since ALL leading whitespace is stripped, changing the indentation of that continuation line does NOT change the string. Phew. Same for the stage intro literal: continuation lines' leading whitespace is stripped entirely, so re-indenting is safe. 
+
+But careful: rustfmt will re-indent my moved code. Since leading whitespace after `\` is stripped, indentation doesn't matter. 
+
+And for the intro literal in build_stage_block, if I keep it at the same nesting (`out.push_str(` at 4 spaces), rustfmt keeps it. Fine.
+
+Now: `push_materials(&mut out, skills_dir, profile.system_materials);` — `profile.system_materials` is `&'static [&'static str]`; the param is `&[&str]`. Coercion: `&'static [&'static str]` → `&[&str]` requires variance — `&'static [&'static str]` is a subtype of `&'a [&'a str]`, and the compiler does unsize/coerce here fine (it's a reference to slice, no unsizing needed, just subtyping). Should work. If not, I'll use `&'a [&'a str]` generic or `materials: &[&str]` with explicit deref. Let me double check the call in build_task_block: `let materials = task.materials();` → `&'static [&'static str]` — same. Fine.
+
+Then in build_task_block (lines 390-394):
+```rust
+    let directive = task.directive();
+    if !directive.is_empty() {
+        out.push('\n');
+        out.push_str(directive);
+    }
+```
+→ `    push_directive(&mut out, task.directive());`
+
+And lines 422-424:
+```rust
+        for rel in materials {
+            out.push_str(&load_one_material(skills_dir, rel));
+        }
+```
+→ `        push_materials(&mut out, skills_dir, materials);`
+
+Great: r1 saves: build_stage_block 15→12 (−3), load_system_materials 7→0 (−7), load_one_material 18→0 (−18), push_materials +18 (merged body ≈ 18 lines), push_directive +6, build_task_block −4 −2 = −6.
+Let me count push_materials: fn sig 1 + doc 2 + for 1 + let path 1 + match 1 + Ok arm 4 + Err arm 8 + closing 2 = 20? Let me write it and count later. Original load_one_material was 18 lines (271-289: doc 1, fn 1, let mut out 1, let path 1, match 1, Ok arm 4, Err arm 7, close... let me count precisely:
+```
+271 /// 读一份手册，冠以...
+272 fn load_one_material(skills_dir: &Path, rel: &str) -> String {
+273     let mut out = String::new();
+274     let path = skills_dir.join(rel);
+275     match std::fs::read_to_string(&path) {
+276         Ok(text) => {
+277             out.push_str(&format!("\n\n【角色指令 · {}】\n", rel));
+278             out.push_str(text.trim_end());
+279         },
+280         Err(_) => {
+281             tracing::warn!(...);
+282             out.push_str(&format!(
+283                 "\n\n【角色指令缺失...\
+284                      也不要静默继续；...\n"
+285             ));
+286         },
+287     }
+288     out
+289 }
+```
+= 19 lines.
+Hmm, wrapping the body in a `for` loop inside push_materials: sig+doc(3) + for(1) + let path(1) + match(1) + Ok(4) + Err(8) + close(1) + close for(1) = 20? Let me write:
+
+```rust
+/// 逐份读入手册全文并追加，冠以「角色指令」来源头。读不到必须让模型看见：只打日志它会凭记忆补规范。
+/// 读材料的机器只此一处 —— 按任务与按阶段两条注入路径共用。
+fn push_materials(out: &mut String, skills_dir: &Path, materials: &[&str]) {
+    for rel in materials {
+        let path = skills_dir.join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                out.push_str(&format!("\n\n【角色指令 · {}】\n", rel));
+                out.push_str(text.trim_end());
+            },
+            Err(_) => {
+                tracing::warn!("[skill_agent] 阶段材料缺失: {}", path.display());
+                out.push_str(&format!(
+                    "\n\n【角色指令缺失 · {rel}】\n本文件读取失败。其中的规范不得凭记忆代替，\
+                     也不要静默继续；先告知用户技能文件缺失（可能需要在数据同步里重新勾选）。\n"
+                ));
+            },
+        }
+    }
+}
+```
+Count: 1 doc + 1 doc + 1 sig + 1 for + 1 let + 1 match + 4 Ok + 8 Err + 1 close match + 1 close for + 1 close fn = 21 lines.
+
+So r1 = old (15 + 7 + 19 = 41) → new (12 + 6 + 21 = 39), plus build_task_block −6, plus... hmm wait, push_directive + push_materials + build_stage_block = 12+6+21 = 39 vs old build_stage_block 15 + load_system_materials 7 + load_one_material 19 = 41. Net −2 there, and −6 in build_task_block → r1 = −8. Hmm, the merged load_one_material into push_materials costs the for/close lines (+2) but saves the `let mut out`/`out` lines (−2) → neutral. The −8 comes mostly from build_task_block's two call sites + load_system_materials.
+
+Let me recount build_stage_block new = 12 lines:
+```
+/// 渲染阶段块（阶段名 + 行为要求 + 角色指令），拼在系统提示末尾以保前缀缓存。
+pub fn build_stage_block(skills_dir: &Path, stage: Stage) -> String {
+    let profile = profile(stage);
+    let mut out = format!("\n\n【当前阶段】{}", stage.label());
+    push_directive(&mut out, profile.directive);
+    out.push_str(
+        "\n\n以下技能文档是本阶段**必须遵守的角色指令**，不是参考资料。\
+         \n已注入的文档无需重复调用 read_skill；文档里引用到的其他角色技能，\
+         需要时仍用 read_skill 加载。",
+    );
+    push_materials(&mut out, skills_dir, profile.system_materials);
+    out
+}
+```
+= 1 doc + 11 = 12. Old = 1 doc + 15 = 16? No — line 246 is the doc comment, 247-261 the fn = 15 lines, so 16 total. New = 12. −4.
+
+OK so r1 ≈ −4 (stage_block) −7 (load_system_materials) −2 (load_one_material merge) −6 (build_task_block) = −19? Let me recompute: old block = doc(1)+fn(15) = 16; load_system_materials = doc? line 262 is blank, 263 fn... lines 263-269 = 7 lines (no doc comment). load_one_material = doc(1)+19 = 20? Lines 271-289 = 19 lines total including the doc comment at 271. So:
+old = 16 + 7 + 19 = 42
+new = 12 + push_directive(6) + push_materials(21) = 39 → −3
+build_task_block: −6
+r1 total = −9.
+
+Hmm, −9. push_directive as 6 lines:
+```
+/// 一段角色指令（前导空行 + 全文）；空的不注入 —— 两条装配路径共用。
+fn push_directive(out: &mut String, directive: &str) {
+    if !directive.is_empty() {
+        out.push('\n');
+        out.push_str(directive);
+    }
+}
+```
+= 6 lines. Used twice, saving 4+4=8 → net −2. OK.
+
+r1 = −9 to −11. Fine, let's target −10.
+
+Total: r1 −10, r2 −6, r3 −11 → −27. Dedup +5. Tests +44. Net +22.
+
+I'm going to accept this and report honestly. BUT, let me reconsider one more time if there's a way to get the file net down... 
+
+What if I make the queue-dedup fix save lines by *simplifying* write_queue? Look at lines 526-532:
+```rust
+            // 同 `(kind, target)` 只登记一次：一轮里每做完一项都要重写一次账，不能每写一次加一行。
+            if kept
+                .iter()
+                .any(|e| e.kind == item.kind && e.target == target)
+            {
+                continue;
+            }
+```
+That's the registration dedup (against `kept`). With the archive dedup added, this registration dedup becomes partially redundant... but not fully: it prevents re-registering Open items in the same turn (kept entries). Hmm, with archive-dedup, if an item was settled and archived, re-registering it then immediately re-archives → dedup drops it. So the `kept` dedup check could be... no wait, it also matters for Open items (which are in `kept`), preventing duplicate Open lines. Keep both.
+
+Hmm, could the (kind,target,mark) dedup helper be a small method on QueueEntry?
+```rust
+impl QueueEntry {
+    /// 归档去重只看这三样：同一件事、同一个结论只留一行。
+    fn same_conclusion(&self, other: &Self) -> bool {
+        (self.kind, &self.target, self.mark) == (other.kind, &other.target, other.mark)
+    }
+}
+```
++6, then in archive:
+```rust
+    // 一轮里每做完一项都用同一份 plan 重写一次账；已有结论的项已从状态里搬走，不挡一下会写第二条。
+    let fresh: Vec<QueueEntry> = closed.iter().filter(|e| !entries.iter().any(|o| o.same_conclusion(e))).cloned().collect();
+    entries.extend(fresh);
+```
++2 → total +8. Similar.
+
+OK, alternatively I could combine the dedup into the existing `write_queue` flow to reuse... e.g., filter `closed` before passing to archive_queue_done? Same lines.
+
+Alright, let me now think about whether to trim one of the mandated tests. Actually, hmm, let me reconsider T1's size once more. What if the test uses `Stage::Modify` with an EMPTY design and exercises fewer lines? Then `build_run_materials` output = just the progress block + the "现有设计稿" only if non-empty. Hmm, the task says create design.md etc. The output would be ~7 lines of literal (progress_block lines). Similar.
+
+Could the expected literal be constructed from parts to reduce line count? Like:
+```rust
+        assert_eq!(out, format!("\n\n【落盘进度】\n- 素材模式：…\n- 剧本配置：…\n…"));
+```
+Using `format!` with `\n` escapes on ONE long line? rustfmt keeps long string args? It won't split string literals, but the line would exceed 100 chars — rustfmt allows long lines when it can't break them (it leaves them). So I could write the entire expected output as ONE very long line! It's ugly but compact:
+```rust
+        assert_eq!(build_run_materials(&snap, Path::new(".")), "\n\n【现有设计稿】\n# 设计稿\n\n## 第1章 · 甲\nid: 01\n\n\n【落盘进度】\n- ...\n- ...\n");
+```
+One gigantic line (~700 chars). Readability suffers badly. Not great engineering, but it does reduce lines. Hmm, the task says "把 build_run_materials 的输出整段 assert_eq! 成字面量" — a single long line literal satisfies that. But it's ugly. I'd rather use the `\`-continued multi-line literal which costs ~7 lines. Let me keep it readable (multi-line) — reporting honesty over line golf. Hmm, but net lines...
+
+Compromise: use the multi-line literal (readable, ~8 lines). Total test ~24 lines.
+
+FINAL DECISION on the net-line issue: implement everything faithfully; report exact before/after; state that the three refactors net −N while mandated tests add +M, so the file grew by (M−N); flag it as a deviation from "净行数必须减少" with the reason (the −60~80/−30~50/−20~30 estimates are not achievable without changing bytes/behavior), and note that if the parent wants a net-shrinking stage.rs, the tests should move to a separate file (which the task forbade) or the refactors must be more aggressive (which would change output bytes).
+
+Hmm, hold on. Before settling, let me reconsider... maybe I should ask the parent? No — I'm a subagent; I should do the work and report. The instruction says to report honestly if something isn't worth doing.
+
+Hmm, hmm. Actually — WAIT. One more idea for a legitimate big saving within refactor 3's scope! The task says "先 grep 所有调用点，确认各自需要的行为，再合成一个函数（或一个入口 + 内部按优先级依次尝试）". What if the unified function lets me ALSO delete `chapter_id_of_path`'s sibling logic... no.
+
+Hmm, what about `tools.rs`'s `foreign_package_refusal` + `bind_script_key_if_new`? Those are call sites; only −1 line there.
+
+OK, another thought: **maybe I can count the two YAML files' lines?** No.
+
+Let me just go. Actually, let me reconsider ONE more source of savings that's squarely in scope: refactor 2 says the fact layer should compute once. What if I move `progress_block`'s remaining reads (config_line's story_config.yaml, chapter-details is_file, queue.json) into a single "read once" locally in build_run_materials and pass them as a small struct? That doesn't reduce lines (adds struct).
+
+Fine. GO.
+
+Actually hold on, one more consideration about r2 that could save more: `design_line` and `config_line` — could they merge into one loop? No, different files/messages.
+
+Let me now write the code. I'll be careful and incremental.
+
+### Step 1: Add T1 and T2 (characterization tests, using current APIs)
+
+T2 (pre-refactor version):
+```rust
+    /// 路径 → 剧本包 key：三类锚点（`.agent/` / `Chapters/` / `story_config.yaml`）与"已知剧本包
+    /// 列表"最长匹配合一之后，这四条路径的结果**一字不变**。
+    #[test]
+    fn package_key_derivation_is_unchanged() {
+        let p = |tail: &str| format!("/data/game_data/scripts/{tail}");
+        assert_eq!(
+            script_key_of_package_path(&p("standalone/甲/story_config.yaml")).as_deref(),
+            Some("standalone/甲")
+        );
+        assert_eq!(
+            script_key_of_story_config(&p("standalone/甲/story_config.yaml")).as_deref(),
+            Some("standalone/甲")
+        );
+        ...
+    }
+```
+Hmm — to keep the test identical before/after, better to define a helper closure inside the test that dispatches to whichever implementation is current, and keep the assertions the same:
+
+Before:
+```rust
+        let key = |path: &str| {
+            script_key_of_story_config(path).or_else(|| script_key_of_package_path(path))
+        };
+```
+After:
+```rust
+        let key = |path: &str| script_key_of(path, &[]);
+```
+Then the assertions (`assert_eq!(key(&p("...")).as_deref(), Some("...")))` are unchanged. That's a clean approach: only the closure body changes. And the known-list assertion:
+Before: `script_key_of_script_path(path, &known)`; After: `script_key_of(path, &known)`.
+I can have a second closure `key_known`. Hmm, or structure the test as:
+
+```rust
+    /// 路径 → 剧本包 key：四个典型路径（含"不属于任何已知剧本包"）的结果**一字不变**。
+    /// 三个入口（story_config / 已知包最长匹配 / 锚点）合一之后，这里只换实现、不换结论。
+    #[test]
+    fn package_key_derivation_is_unchanged() {
+        let p = |tail: &str| format!("/data/game_data/scripts/{tail}");
+        let key = |path: &str| script_key_of(path, &[]);
+        assert_eq!(key(&p("standalone/甲/story_config.yaml")).as_deref(), Some("standalone/甲"));
+        assert_eq!(key(&p("character/乙/丙/.agent/design.md")).as_deref(), Some("character/乙/丙"));
+        assert_eq!(key(&p("standalone/丁/Chapters/01.yaml")).as_deref(), Some("standalone/丁"));
+        assert_eq!(key(&p("../elsewhere/notes.md")), None);
+
+        // 包根下的散文件（三类锚点都不沾）：按"已知剧本包列表"最长匹配
+        let known = vec!["character/乙".to_string(), "character/乙/丙".to_string()];
+        assert_eq!(
+            script_key_of(&p("character/乙/丙/notes.md"), &known).as_deref(),
+            Some("character/乙/丙")
+        );
+    }
+```
+Before version: 
+```rust
+        let key = |path: &str| script_key_of_story_config(path).or_else(|| script_key_of_package_path(path));
+        ...
+        assert_eq!(script_key_of_script_path(&p("character/乙/丙/notes.md"), &known).as_deref(), Some("character/乙/丙"));
+```
+Good, only 2 lines change.
+
+Careful with the 4th case: `key(&p("../elsewhere/notes.md"))` = `.../scripts/../elsewhere/notes.md` → hmm, that DOES contain "/scripts/" → tail = "../elsewhere/notes.md" → anchors: no "/.agent/" or "/Chapters/" → strip_suffix("/story_config.yaml") → None. So None. Good. And script_key_of_story_config → None. OK. But the task says "路径不属于任何已知剧本包" — better use a path with no /scripts/ at all: `"/data/other/notes.md"` → all None. Cleaner. I'll use that.
+
+Wait, but I should double check `script_key_of_package_path("../elsewhere/notes.md")` — irrelevant now.
+
+Also should I test the `known`-list case with a path where anchors fail but known matches: `.../scripts/character/乙/丙/characters/甲.md` → anchors: no /.agent/ or /Chapters/ → story_config no → known longest → "character/乙/丙". Good, use a realistic loose file.
+
+Now T1:
+```rust
+    /// `build_run_materials` 的输出（进 messages，**不在对拍台覆盖范围内**）：整段钉成字面量 ——
+    /// 事实层把重复读盘合并成一次时，这里**一个字都不许变**。
+    #[test]
+    fn run_materials_are_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("lingchat-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(AGENT_DIR)).unwrap();
+        std::fs::write(dir.join(DESIGN_REL_PATH), "# 设计稿\n\n## 第1章 · 甲\nid: 01\n").unwrap();
+        std::fs::write(dir.join(CHAPTER_DETAILS_REL_PATH), "## 第1章 · 甲\n正文\n").unwrap();
+        std::fs::write(dir.join(CONSTRAINTS_REL_PATH), "- 素材模式：先预留\n").unwrap();
+        std::fs::write(dir.join(QUEUE_JSON_REL_PATH), "[]").unwrap();
+        let snap = StageSnapshot {
+            stage: Stage::Setup,
+            script_dir: Some(dir.clone()),
+            plan: vec!["01".into()],
+            written: vec!["01".into()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_run_materials(&snap, Path::new(".")),
+            "\n\n【现有设计稿】\n# 设计稿\n\n## 第1章 · 甲\nid: 01\n\
+             \n\n【落盘进度】\n\
+             - 素材模式：先预留（`.agent/constraints.md` 是唯一来源；要改就改那一行，并检查别处有没有旧说法）\n\
+             - 剧本配置：缺（系统会补一份最小骨架，能打开但不是成品）\n\
+             - 设计稿：1 章（01）\n\
+             - 章节细节稿：在（.agent/chapter-details.md）—— 落盘时的细节以它为准，跟设计稿的梗概有出入就当场对齐\n\
+             - 已落盘：01\n"
+        );
+    }
+```
+Wait: `CONSTRAINTS_REL_PATH` is `pub use crate::utils::script_modes::CONSTRAINTS_REL_PATH;` in stage.rs → accessible via `super::*`. Good. `QUEUE_JSON_REL_PATH` is private but in the same module → accessible. Good.
+
+Note the design write: `"# 设计稿\n\n## 第1章 · 甲\nid: 01\n"` — `parse_plan` on it: block_ranges finds lines starting with "##" → line index 2 ("## 第1章 · 甲"); block = lines[3..4] = ["id: 01"], block_id → "01". So plan = ["01"]. And design text: `design.trim_end()` = "# 设计稿\n\n## 第1章 · 甲\nid: 01". So the first output part = "\n\n【现有设计稿】\n# 设计稿\n\n## 第1章 · 甲\nid: 01". Good.
+
+progress_block lines with stage=Setup, written=["01"], plan=["01"]:
+1. "素材模式：先预留（...）"
+2. uses_character_cards: cast = Unspecified, script_key = None (default) → `std::fs::read_dir(dir.join("characters"))` → err → false. So NO cast line.
+3. constraint_conflict: constraints text = "- 素材模式：先预留\n" → conflict_note → None (only one statement). So no ⚠️ line.
+4. config_line: story_config.yaml missing → "剧本配置：缺（系统会补一份最小骨架，能打开但不是成品）"
+5. `dir.join(DESIGN_REL_PATH).is_file() || !written.is_empty()` → true → design_line: plan=["01"] non-empty → "设计稿：1 章（01）"
+6. chapter-details is_file → true → "章节细节稿：在（.agent/chapter-details.md）—— 落盘时的细节以它为准，跟设计稿的梗概有出入就当场对齐"
+7. "已落盘：01"
+8. written non-empty → missing_assets_of_written(snap, dir, data_dir): for id "01" → chapter_file(dir, "01") = script_paths::resolve_chapter_file(dir, "01", false) — does that need the dir to exist? dir exists (tmp), Chapters/ doesn't → resolve fails → None → continue. So no asset line. 
+
+Hmm wait — will `resolve_chapter_file` possibly *create* things or return Ok even if missing? Let me check script_paths::resolve_chapter_file. It might scan the Chapters dir for a file matching the id and return Err if not found. Since `Chapters/` doesn't exist, likely Err. Good. But careful: `tmp_dir`-like creation in my test only creates `.agent/`; I don't create `Chapters/`. So no chapter files. Good.
+
+9. chapter_after(snap): next_chapter = first plan id not in written = plan ["01"], written ["01"] → none → None. So no 下一章 line.
+10. read_queue_progress(dir): queue.json = "[]" → pending empty → None. So no queue line.
+
+So the expected output ends with "已落盘：01\n". 
+
+Hmm, `data_dir` = Path::new(".") — used only in missing_assets_of_written (not reached). Fine. Actually, to be safe against data_dir misuse, pass the temp dir itself? `build_run_materials(&snap, &dir)` — data_dir is only used for asset checks; no chapters → not reached. I'll pass `&dir` (more sensible).
+
+Hmm, but "。" in `read_queue_progress`... not reached.
+
+Also note `render_view`... not used.
+
+Now the progress_block header: `let mut out = String::from("\n\n【落盘进度】\n"); for line in lines { out.push_str(&format!("- {}\n", line)); }`. Good.
+
+So expected = "\n\n【现有设计稿】\n" + design.trim_end() + "\n\n【落盘进度】\n" + "- 素材模式：...\n- 剧本配置：...\n- 设计稿：1 章（01）\n- 章节细节稿：...\n- 已落盘：01\n".
+
+Let me double check the design block format: `format!("\n\n【现有设计稿】\n{}", design.trim_end())` — yes.
+
+Great. I'll verify by running.
+
+Now let me also double check `uses_character_cards` with `snap.script_key = None` (from ..Default::default()): `.is_some_and(...)` → false. Then read_dir("characters") → Err → false. Good.
+
+Now T3 (queue dedup):
+```rust
+    /// 一轮里每做完一项都用**同一份 plan** 重写一次账；已有结论的项已从状态里搬走 ——
+    /// 不挡一下会被重新登记、再往归档里写一条重复的行。
+    #[test]
+    fn archived_item_is_written_only_once() {
+        let dir = tmp_dir("archive-once");
+        write_chapter_file(&dir, "03");
+        let turn = registered_before_now();
+        let items = vec![item(TaskKind::WriteChapter, "03")];
+        write_queue(&dir, &items, false, turn).unwrap();
+        write_queue(&dir, &items, false, turn).unwrap();
+
+        assert_eq!(done_of(&dir).matches("转成 YAML：03").count(), 1, "{}", done_of(&dir));
+    }
+```
+Wait, I must double-check the bug actually reproduces with this: 
+Call 1: state empty → kept = [] (no stale) → register 03 (Open, registered_at=turn) → entry_evidence(dir, entry): Chapter 03 file exists and `changed_after(path, turn)`: turn = now - 3600s, file mtime = now → >= turn → true → Done → settled → closed = [03 Done] → open = [] → archive_queue_done writes archive with 03 Done (mark x).
+Call 2: read_state(QUEUE_JSON) → open = [] (empty) → kept = [], stale = [] → register 03 again (registered_at=turn) → evidence → Done → closed = [03 Done] → archive_queue_done: entries = existing [03 Done] + closed [03 Done] = 2 entries → queue-done.md has TWO lines with "转成 YAML：03". 
+
+So the test fails before the fix (count 2) and passes after. 
+
+Now, does the existing test `registers_judgeable_item_once` also produce a duplicate archive? It writes twice with a WriteChapter item but the chapter file is NOT created, and `turn = registered_before_now()`. First call: entry_evidence → chapter_file None → Open → stays in queue (open). Second call: kept from state (registered_at == now) → dedup by (kind,target) → not re-registered → still Open. So queue.md has 1 line and archive is empty. That test asserts queue.md count == 1. OK unaffected.
+
+But `empty_target_item_registers_once_and_closes`: items Outline "" and CheckAssets ""; writes design.md and assets.md AFTER registering (with turn = registered_before_now()), then calls write_queue again with the same items and same turn. Let's trace: 
+Call 1: register 2 items (Open). evidence: Outline with empty target → `changed_after(design.md)` → design doesn't exist yet → false → Open. CheckAssets → assets.md missing → Open. So both stay open. queue.md has 2 lines.
+Then write design.md and assets.md. 
+Call 2: read_state → both entries with registered_at == turn → kept. register: both already in kept → skip. evidence: both changed after turn → Done → closed = [outline Done, check_assets Done] → archive gets 2 lines.
+Call 3? No, only 2 calls. Wait:
+```
+        write_queue(&dir, &items, false, turn).unwrap();      // call A (before writing files)
+        write_queue(&dir, &items, false, turn).unwrap();       // call B (before writing files)
+        <write design + assets>
+        write_queue(&dir, &items, false, turn).unwrap();       // call C
+```
+Call A: register both, evidence Open (files missing) → open=[O,O], archive empty.
+Call B: kept both (same registered_at); register skipped (dedup); evidence still Open → open=[O,O]; closed empty → archive_queue_done([].) → returns early.
+Call C: kept both; evidence Done for both → closed 2 → archive written once with 2 lines. No duplicates.
+Good, dedup doesn't affect it.
+
+`archive_keeps_only_the_newest`: all 55 items distinct targets, one write_queue call → no duplicates. Fine.
+
+Hmm, what about `chapter_outline_written_into_design_counts_as_done`: 
+```
+        write_queue(&dir, &items, false, turn).unwrap();   // A: 06,07,08 Open (no design)
+        <write design>
+        write_queue(&dir, &[], false, turn).unwrap();       // B: evidence → Done → archive 3 lines
+```
+Then asserts `done_of(&dir).matches("- [x] [outline@").count() == 3`. No duplicates. Fine.
+
+`multi_turn_sequence_drops_leftovers`: turn 1: write_queue(chapters, t1) → 01,02,03 registered; evidence: no chapter files → all Open. Then write_chapter_file(01); write_queue([], t1) → kept all 3 (same registered_at); items empty → no registration; evidence: 01 Done, 02/03 Open → closed=[01], open=[02,03]. Archive gets 01 once.
+Turn 2: write_chapter_file(02); write_queue([02], t2) → read_state: entries with registered_at t1 ≠ t2 → stale=[02,03] → both Open → Dropped → closed=[02~,03~]; kept=[] → register 02 (Open, t2) → evidence: chapter 02 exists and mtime >= t2? t2 = t1+1µs, file written just now > t2 → Done → closed=[02~,03~,02 Done]. Archive = [write_chapter 01 Done, 02 Dropped, 03 Dropped, 02 Done]. Then asserts done contains "- [~] [write_chapter@" and "转成 YAML：03". Fine.
+
+Note: with my (kind,target,mark) dedup, this is unaffected (02 Done vs 02 Dropped differ by mark). Good — that's exactly why the spec says include `mark` in the key.
+
+Now let me write everything. Also must double check: does adding the archive-dedup break `archive_keeps_only_the_newest`'s expectation of exactly QUEUE_DONE_KEEP lines? All distinct. Fine.
+
+### r3 call-site updates
+
+tools.rs:582: `let key = stage::script_key_of_package_path(path)?;` → `let key = stage::script_key_of(path, &[])?;`
+tools.rs:605: 
+```rust
+    let Some(key) =
+        stage::script_key_of_story_config(path).or_else(|| stage::script_key_of_package_path(path))
+    else {
+        return;
+    };
+```
+→
+```rust
+    let Some(key) = stage::script_key_of(path, &[]) else {
+        return;
+    };
+```
+That's a net −1 line in tools.rs.
+
+db.rs:254-257:
+```rust
+            let derived = crate::ai_service::skill_agent::stage::script_key_of_package_path(path)
+                .or_else(|| {
+                    crate::ai_service::skill_agent::stage::script_key_of_script_path(path, &known)
+                });
+```
+→
+```rust
+            let derived = crate::ai_service::skill_agent::stage::script_key_of(path, &known);
+```
+−2 lines in db.rs.
+
+Both are mechanical and behavior-preserving (given the merged function's semantics). I'll document in the report.
+
+Hmm, wait. tools.rs:582 passes `&[]` — but `foreign_package_refusal` then checks `existing.iter().any(|k| k == &key)`. With the known-list not passed, behavior is exactly as before. But hmm, is it *better* to pass `existing`? It would change behavior (refuse writes to loose files in known packages). Don't. Keep `&[]`.
+
+Hmm, but hold on: with `known: &[]`, does the merged function behave identically to the old `script_key_of_package_path` for ALL inputs? My merged function = anchors → story_config → known (empty → None). Yes, identical.
+
+And for tools.rs:605 (old: story_config or package_path) vs merged with `&[]`: The difference is only the rsplit vs split_once + trim_matches edge cases. Let me pick the implementation such that it matches *both* old functions in the common case, and note the exotic difference. Since the binding path's purpose is "story_config.yaml 落盘即包诞生", and package_path already handles that identically for normal paths, fine.
+
+Hmm, actually — maybe I can make the story_config branch use `rsplit_once("/scripts/")` (matching the OLD script_key_of_story_config) while the anchor branch uses split_once. Then tools.rs:605 is 100% identical, and db.rs:254 (package_path first) — for a story_config.yaml path, old package_path used split_once+strip_suffix; new would use rsplit... differs only in the exotic double-/scripts/ case. Either way one of them has an exotic difference. Which to prefer? 
+
+I could implement the story_config branch to handle BOTH: use `split_once` to get the tail; strip_suffix; non-empty. For a path with two "/scripts/", split_once gives a longer key ("character/甲/scripts/乙") while rsplit gives "乙". Hmm, which is more correct? For our data layout, the *first* "/scripts/" is the real scripts root (data/game_data/scripts/...), so split_once's answer is more correct. I'll use split_once (matching package_path) and note it.
+
+Hmm, wait. Actually there's a subtle issue with using split_once for the story_config case in the *binding* path: the binding path is `write_file` to `<new dir>/story_config.yaml`. The path given by the model could be relative (e.g. `character/甲/story_config.yaml` without the `/scripts/` prefix) — then NEITHER old function matched (`rsplit_once("/scripts/")` needs the literal "/scripts/"). Hmm, what if the model writes `.agent/design.md` relative? `script_key_of_package_path(".agent/design.md")` → split_once("/scripts/") → None → no binding. That's existing behavior (the comment says the normal path is writing `<新目录>/story_config.yaml`). Hmm, so relative paths are already unsupported. Fine, unchanged.
+
+OK, now let me also handle: does anything else use `script_key_of_story_config`? I grepped: only tools.rs:605. Good.
+
+Let me now write the code. Let me first add the tests (T1, T2) and run the full acceptance.
+
+Actually, one consideration on where to put T1/T2: `facts_tests` module (has `use super::*`). T1 needs `StageSnapshot`, `Stage`, `Path`, `build_run_materials` — all in scope. Good.
+
+Let me write T1 and T2 into `facts_tests` now.
+
+One more check on `Path::new(".")` vs `&dir` for data_dir: I'll use `&dir` (the package dir) to be robust. Hmm, `data_dir` semantically is `data/game_data`; passing the package dir is weird but this test path doesn't use it. Actually, if `missing_assets_of_written` DID reach `check_chapter_assets(data_dir, ...)` with a nonexistent asset dir, it would just report everything missing → an asset_impact_line would appear in the output. Since no chapter files exist, it won't be reached. I'll pass `Path::new(".")` to be explicit that data_dir is irrelevant... but if resolution behavior differs (e.g. resolve_chapter_file returns Ok even for missing files by *glob*), the line could appear. My test will tell me the actual output; if it differs from my reading, I'll investigate. Let me just pass `&dir`.
+
+Let me write it.
+
+Also: the two unmodified YAML files — I must ensure `cargo test` doesn't touch them (it doesn't; golden_tests read skills data only).
+
+Let me write the test additions now.

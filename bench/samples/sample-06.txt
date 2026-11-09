@@ -1,0 +1,1886 @@
+Good. Now let me plan the edits. I'll go block by block, using the edit tool.
+
+Note: 205 comment lines counted. Target: reduce to ≤ ~100 (more than half reduction). Given many are short one-liners already that are still needed as constraints... Let's be aggressive but sensible.
+
+Let me now compose each edit. I'll work top-down. Since line numbers shift, I'll use unique text matches.
+
+Let me draft each change:
+
+### 1. Module doc (1-7)
+```
+//! 阶段推导与事实层。
+//!
+//! 阶段由文件系统事实推导，不落库、不强制流程；真正阻塞的确认只有工具入口的命令审批，
+//! 这里的「确认门」全部只是提示词。
+//! **注入什么（手册 / 行为要求 / 思考模式）一律按任务类型算，不按阶段算** —— 同一阶段里
+//! 「只提问的那一轮」与「把剧情转成 YAML 的那一轮」需要的完全不是一回事（见 `role.rs`）。
+//! 这个模块只回答"剧本现在是什么状态"。
+```
+Condensed:
+```
+//! 阶段推导与事实层：只回答"剧本现在是什么状态"。
+//!
+//! 阶段由文件系统事实推导，不落库；这里的「确认门」都只是提示词。
+//! 注入什么（手册 / 行为要求 / 思考模式）按任务类型算，不按阶段算（见 `role.rs`）。
+```
+7 → 4 lines.
+
+### 2. Line 21
+`/// 流程产物目录。点号目录不进引擎扫描与编辑器枚举；「详情」浮窗直接列这一层。` → keep as is? It's one line and a constraint. Keep. Actually "点号目录不进引擎扫描与编辑器枚举" is a constraint (why `.agent`). Keep.
+
+Hmm, to hit the 50% target I need to cut a lot. But short one-liners like this are already minimal. I'll keep ones that are one line and informative.
+
+Let me be systematic: for each comment, decide: KEEP (1 line, constraint) / TRIM / DELETE.
+
+### 3. Line 26
+`/// 章节细节稿（按章分节）：模型曾自己发明它写细节而系统不知情，现在是正式产物，改完要对齐设计稿。`
+→ `/// 章节细节稿（按章分节）：正式产物，改完要对齐设计稿。`
+Retrospective "模型曾自己发明它写细节而系统不知情" removed.
+
+### 4. Lines 31-32
+```
+/// 队列的**视图**：由状态渲染出来（用户看的是这一份）。代码只在路由时读它当"上一轮状态"交给流程
+/// Agent，不解析它。
+```
+→ `/// 队列的视图：由状态渲染出来。代码只在路由时读它当"上一轮状态"交给流程 Agent，不解析它。`
+2 → 1.
+
+### 5. Line 35
+`/// 打完勾的队列项搬到这里。只给人回看历史，**不注入提示词** —— 旧账不该影响当前判断。`
+→ `/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。`
+1 → 1.
+
+### 6. Line 38
+`/// 队列的**机器状态**（真相在这里）：serde 序列化的 `Vec<QueueEntry>`。上面那份 markdown 只是它的视图。`
+→ `/// 队列的机器状态（真相在这里）：serde 序列化的 `Vec<QueueEntry>`，上面的 markdown 只是它的视图。`
+
+### 7. Line 41
+`/// 归档的机器状态。与 [`QUEUE_JSON_REL_PATH`] 同构，只是装着了结过的项。` → keep as is (1 line). Maybe trim: `/// 归档的机器状态，与 [`QUEUE_JSON_REL_PATH`] 同构，只装着了结过的项。` Keep basically.
+
+### 8. Line 44
+`/// 归档保留条数上限：这是给人回看的流水，不该无限长。` → `/// 归档保留条数上限（给人回看的流水，不该无限长）。` or just keep. It's 1 line. Keep.
+
+### 9. Line 47
+`/// 空目标的占位写法：状态里"没点名目标"就是空串，视图与注入给模型的进度行都塌成它。`
+→ `/// 空目标的占位写法：状态里没点名目标就是空串，视图与注入的进度行都塌成它。` (1 line)
+
+### 10. Line 50
+`/// 视图里的登记时刻只到秒（`[write_chapter@1790664196]`）；状态里存的是完整时刻（纳秒）。`
+Keep — informative, 1 line.
+
+### 11. Line 55
+`/// 自动骨架的标记行。`progress_block` 靠它判断"这份配置还没被补全"。` → keep.
+
+### 12. Lines 58-59
+```
+/// 确保剧本包有个**能加载**的骨架：缺 `story_config.yaml` 补一份最小的，缺 `Chapters/` 就建。
+/// 编辑器按 `story_config.yaml` 认剧本，少了它列表里看不到、引擎也跳过；**已存在就不动**。
+```
+→ `/// 确保剧本包有个能加载的骨架（缺 `story_config.yaml` 补最小的一份、缺 `Chapters/` 就建）：编辑器靠它认剧本，已存在就不动。`
+1 line. 2→1.
+
+### 13. Lines 94-96
+```
+// 相对技能目录（`data/game_data/skills`）的材料路径。**角色手册路径由 `role.rs` 拥有**，
+// 这里只留流程总纲：按阶段注入那一套（`StageProfile` / `build_stage_block`）已经删了 ——
+// 注入什么手册、要不要开思考，一律按**任务类型**算（见 `role.rs`）。
+```
+→ `// 相对技能目录（`data/game_data/skills`）的材料路径；这里只留流程总纲，角色手册路径由 `role.rs` 拥有。`
+3 → 1.
+
+### 14. Lines 99-101
+```
+/// 创作阶段 —— **剧本状态的投影**，只回答"这个剧本走到哪一步"；按状态划分，S1–S3 合并为 [`Stage::Setup`]。
+/// 它**不再决定**注入哪些手册、要不要开思考（那些按任务类型算，见 `role.rs`）：同一阶段里
+/// 「只提问的那一轮」与「把剧情转成 YAML 的那一轮」需要的完全不是一回事。
+```
+→ `/// 创作阶段：剧本状态的投影，只回答"走到哪一步"；不决定注入哪些手册与要不要开思考（那些按任务类型算，见 `role.rs`）。`
+3 → 1.
+
+### 15. Line 104
+`/// 没绑定剧本（[`derive`] 的默认值）；绑了 key 但包或可解析的计划还没有时是 [`Stage::Setup`]。`
+Keep (doc for variant, 1 line).
+
+### 16. 108 `/// 设计稿已声明章节，但尚未写完。` keep.
+### 17. 111 `/// 有剧本包、无设计稿、且已有章节：修改既有剧本。` keep.
+
+### 18. Line 120
+`/// 设计稿全文（`None` = 读不到）。事实层只读一次盘：这里读过之后不再各自重读。`
+→ `/// 设计稿全文（`None` = 读不到）。事实层只读一次盘，读过之后不再各自重读。` Keep 1 line.
+
+### 19. 127 keep (1 line).
+
+### 20. 148 `// 包还不存在 → 创建流程` keep (short, explains why).
+### 21. 157 `// 设计稿读一次：`plan` 与「现有设计稿」都从这一份文本里出（读不到就是 `None`，与空文件不同）` → keep? It's 1 line, informative. Trim: `// 设计稿读一次：`plan` 与「现有设计稿」都出自这一份文本（读不到是 `None`，与空文件不同）`. Keep.
+
+### 22. 162 `// 无设计稿：已有章节说明是既存剧本，否则还在设计与大纲阶段` keep? It explains branching. Trim to `// 无设计稿：有章节就是既存剧本，否则还在设计大纲阶段`. Keep 1 line.
+
+### 23. 184 `/// 追加一段行为要求（前导空行 + 全文）；空的不注入。` keep.
+
+### 24. 192-193
+```
+/// 逐份读入手册并追加，冠以「角色指令」来源头。读不到必须让模型看见：只打日志它会凭记忆补规范。
+/// **读材料的机器只此一处**：按任务装配的 [`build_task_block`] 走它。
+```
+→ `/// 逐份读入手册并追加，冠以「角色指令」来源头；读不到必须让模型看见（只打日志它会凭记忆补规范）。`
+2 → 1.
+
+### 25. 219-220
+```
+/// 这一轮要不要产出能跑章节（**派生值**）：计划里有没有 `WriteChapter` / `ReviseChapter`，
+/// 见 `core` 的 `creates_chapters` —— 不看用户怎么说。
+```
+→ `/// 这一轮要不要产出能跑章节（派生值）：计划里有没有 `WriteChapter` / `ReviseChapter`，见 `core` 的 `creates_chapters`。`
+2 → 1.
+
+### 26. 223 `/// 队列里被跳过的项（做不了），让模型在回执里说明。` keep.
+
+### 27. 225-226
+```
+/// 这一项是不是**本轮最后执行的**（`core` 按执行游标算出来的）。队列序号是"队列里的位置"，
+/// 补过前置的项会把原任务追加到本轮末尾，所以"最后一项"只能由代码认定，不能让模型自己数。
+```
+→ `/// 这一项是不是本轮最后执行的（`core` 按执行游标算出来）。补过前置的项会把原任务追加到本轮末尾，模型数不出来，所以只能由代码认定。`
+2 → 1.
+
+### 28. 228-230
+```
+/// 这一轮**真正下发**的工具清单（`core.rs` 按项算出来的 `allowed`）。
+/// 注入给模型的话必须与实际下发的一致：提示词里报一套、代码给另一套，模型就会照着
+/// 提示词去调一个当场被拒的工具（真机：提示里写着能改，实际只有只读工具）。
+```
+→ constraint: must match actual. → `/// 这一轮真正下发的工具清单（`core.rs` 按项算出的 `allowed`）：注入给模型的话必须与实际下发一致，否则模型会去调当场被拒的工具。`
+3 → 1.
+
+### 29. 234-235
+```
+/// 本轮的注入块：任务 + 行为要求 + 职责边界 + 承接说明 + **该任务要的那几本手册**。
+/// 按任务注入而非按阶段：同一阶段里「只提问的那一轮」不需要落盘手册。
+```
+→ `/// 本轮的注入块：任务 + 行为要求 + 职责边界 + 承接说明 + 该任务要的那几本手册；按任务注入而非按阶段。`
+2 → 1.
+
+### 30. 254-255
+```
+// 队列是逐项执行的：告诉它这是第几项，免得它以为要一次把全部内容塞进一条回复。
+// 「换了前置」那一格本轮真正要做的是前置，标题里点名，免得它照着队列那一行去落盘。
+```
+→ `// 队列是逐项执行的：标题点名这是第几项，免得它以为要一次塞完全部内容。` — hmm, the second line about prerequisite. Combine: `// 队列逐项执行：标题点名第几项（换了前置时点名的是前置），免得它以为要一次塞完全部内容。`
+2 → 1.
+
+### 31. 269-270
+```
+// 「这一项被换成了前置」时必须把话说全：标题写的是"实际要做的"、队列里标的是"原本那一项"，
+// 两个说法打架时模型会停下来纠结该听哪个，还会以为原任务要等下一轮。
+```
+→ `// 换成前置时必须把话说全：标题写"实际要做的"、队列标"原本那一项"，说法打架时模型会停下来纠结。`
+2 → 1.
+
+### 32. 292-293
+```
+// 「一轮多项」的汇报口径：各项互相代劳过（用户只说删第四章的 YAML，第 1 项却把第五章的剧情
+// 也写了），同一段内容也被复述过三遍。
+```
+→ `// 一轮多项时的汇报口径：各项只讲自己做的事，别代劳、别重复贴。` 
+Hmm but the string below already says that. Actually the comment explains why the block exists. The string content itself is explicit. Could delete entirely? The comment gives rationale for the constraint. I'd keep a short one: `// 一轮多项的汇报口径：一项一段，别代劳别的项、别重复贴前面贴过的内容。` — that's just restating the string. Better: delete entirely since the injected text self-explains. Rule 4 says delete comments that code already makes clear. Here the string literal makes it clear. I'll DELETE lines 292-293.
+
+That's 2 → 0.
+
+### 33. 301-302
+```
+// 全轮汇总只交给代码认定的最后一项：队列序号是"队列里的位置"，补过前置的项会把原任务
+// 追加到本轮末尾，模型自己数不出谁最后收尾。
+```
+→ `// 全轮汇总只交给代码认定的最后一项：模型自己数不出谁最后收尾。`
+2 → 1.
+
+### 34. 311 `// 用户这一轮的原话：任务名是从这句话判出来的，一句话里顺手捎带的别的事会漏掉。`
+Keep, 1 line. Maybe trim: `// 用户这一轮的原话：任务名从这句话判出来，捎带的事容易漏。` Keep 1 line.
+
+### 35. 316 `// 「写」还是「落盘」：这一段两个 Agent 都要看到，口径不一致时最先崩的是用户。`
+→ `// 「写」还是「落盘」：两个 Agent 都要看到，口径不一致会让用户看到矛盾。` Keep 1 line.
+
+### 36. 324-326
+```
+// 听用户的：推荐写法只是默认、不是死规矩；"能力范围" = 这一轮能用的工具 + 手上这本手册。
+// 工具清单**照实报**（就是这一轮真正下发的 `allowed`）：报一套、给一套，模型会照着提示词
+// 去调一个当场被拒的工具，然后开始编"已经改好了"。写法自由但范围仍是本轮这几项（见【职责边界】）。
+```
+→ `// 工具清单照实报（就是这一轮真正下发的 `allowed`）：报一套、给一套，模型会去调当场被拒的工具。`
+3 → 1.
+
+### 37. 335 `// 队列是这一轮的工作清单：只给一行"还剩几项"不够 —— 模型会做完手上这件就收尾。`
+→ `// 队列是这一轮的工作清单：只给"还剩几项"不够，模型会做完手上这件就收尾。` Keep 1 line.
+
+### 38. 343 `// 「换了前置」那一格：本轮真正要做的是前置，队列里那一行是补完前置后同轮接着做的原任务`
+→ keep 1 line, trim: `// 换了前置那一格：本轮真正要做的是前置，队列里那行是同轮接着做的原任务。` 1 line.
+
+### 39. 401 `// 仅对话：连手册都不给，免得它顺手把剧本的事也做了（"不要动文件"由【职责边界】说）`
+→ `// 仅对话：连手册都不给，免得它顺手把剧本的事也做了（"不要动文件"由【职责边界】说）。` keep 1 line.
+
+### 40. 412-421 (10 lines)
+```
+// ---------- 队列账本 ----------
+//
+// 这份账只回答一个问题：**这一轮用户让做的事，做完了没有**。四条规矩：
+//
+// 1. **机器状态与视图分开**：真相在 `.agent/queue.json`；`queue.md` / `queue-done.md` 只是它渲染
+//    出来的视图，不支持手改（旧 markdown 格式读不回来）。
+// 2. **只登记代码能核对的项**：收集设想 / 整理设想 / 校验体检 / 仅对话核对不了，不进账本。
+// 3. **队列不跨轮继承**：描述的是"**这一轮**"，上一轮没做完的一律出队（标 `~`）。"这个剧本还欠
+//    什么"看磁盘事实，例外只有一个：用户说「继续」。
+// 4. **打完勾的项搬走**（[`QUEUE_DONE_REL_PATH`]）：归档只留最近 [`QUEUE_DONE_KEEP`] 条。
+```
+→
+```
+// ---------- 队列账本 ----------
+//
+// 这份账只回答一个问题：这一轮用户让做的事做完了没有。真相在 `.agent/queue.json`，
+// `queue.md` / `queue-done.md` 只是它的视图，不支持手改。只登记代码能核对的项；
+// 队列不跨轮继承（上一轮没做完的一律出队，标 `~`）；打完勾的项搬进归档。
+```
+10 → 5. Actually I could go to 4: banner + 3 lines. Let's do:
+```
+// ---------- 队列账本 ----------
+//
+// 这份账只回答"这一轮用户让做的事做完没有"。真相在 `.agent/queue.json`，`queue.md` / `queue-done.md`
+// 只是它的视图，不支持手改。只登记代码能核对的项；队列不跨轮继承（上一轮没做完的一律出队，标 `~`）；
+// 打完勾的项搬进归档（只留最近 [`QUEUE_DONE_KEEP`] 条）。
+```
+That's 5 lines total (banner, //, 3 lines) = 5. Good.
+
+### 41. 423
+`/// 账本里的一项。**只在本轮有效**（见模块内注释第 3 条）。JSON 里就是这四个字段。`
+→ `/// 账本里的一项，只在本轮有效。JSON 里就是这四个字段。`
+
+### 42. 429-430
+```
+/// 目标（章号 / 大纲 / 素材表…），空串 = 未指明。**去重与物证核对都只看它**，
+/// 不再从"给人看的正文"里反解 —— 那一层反解就是被删掉的那套手写解析。
+```
+→ `/// 目标（章号 / 大纲 / 素材表…），空串 = 未指明；去重与物证核对都只看它。`
+2 → 1.
+
+### 43. 432 `/// 登记时刻（Unix 纳秒）。存满精度，于是"这一项是不是本轮的"就是一次相等比较。`
+→ `/// 登记时刻（Unix 纳秒）：存满精度，"是不是本轮的"就是一次相等比较。` Keep 1 line.
+
+### 44. 436 `/// `TaskKind` 归 `role.rs` 所有（不在那儿派生 serde），JSON 里只存它的 key。` keep.
+
+### 45. 448 keep (`/// `- [ ]` 这一轮排的，还没做完。`)
+
+### 46. 450 `/// `- [x]` **这一轮真的做出来了**（物证在登记之后被改写过）。` → `/// `- [x]` 这一轮真的做出来了（物证在登记之后被改写过）。` keep.
+
+### 47. 452 `/// `- [=]` 东西**本来就在盘上**、这一轮没动过 —— 不算做完，也**不算欠**（只有产出型会落到这里）。`
+→ `/// `- [=]` 本来就在盘上、这一轮没动过：不算做完，也不算欠（只有产出型会落到这里）。` keep 1.
+
+### 48. 454-455
+```
+/// `- [~]` 没做完就被放下了：**既不算做完，也不再执行**，只留一行痕 —— 不留痕时磁盘上
+/// 看不出任何痕迹，而模型可能回执说"改好了"。
+```
+→ `/// `- [~]` 没做完就被放下了：不算做完、也不再执行，只留一行痕（否则模型可能回执说"改好了"）。`
+2 → 1.
+
+### 49. 459-466 (8 lines)
+```
+/// 把**本轮**的账落盘：读回状态 → 上一轮的项出队留痕 → 登记本轮的项 → 按磁盘事实打勾 →
+/// 做完的搬进归档 → 状态与视图各写一遍（**状态先写**，视图只是它的渲染）。
+///
+/// **登记规则**（只跟"代码能核对的产物"有关）：
+/// - 核对不出产物的类型（仅对话 / 收集设想 / 整理设想 / 校验体检）不登记 —— 记下来也永远打不了勾。
+/// - **有可核对产物的类型（编写剧本 / 改剧本 / 素材盘点 / 转成 YAML / 改 YAML）只要有目标就登记**
+///   （没记的话，用户打开队列文件看到空的，会以为它根本没排任务）。
+/// - **上一轮的项一律不带过来**（模块内注释第 3 条），登记时刻取**动手之前**的本轮起点。
+```
+→
+```
+/// 把本轮的账落盘：读回状态 → 上一轮的项出队留痕 → 登记本轮的项 → 按磁盘事实打勾 → 做完的搬进归档
+/// → 状态先写、视图后写。登记只跟"代码能核对的产物"有关：核对不出产物的类型不登记，
+/// 有可核对产物的类型只要有目标就登记（登记时刻取本轮起点）。
+```
+8 → 3. Good.
+
+### 50. 474-475
+```
+// 账上的项分两拨：**本轮的**保留，**上一轮剩下的**出队留痕 —— 上一轮已经勾过的保持
+// `[x]`，只有还开着的才降成 `[~]`。
+```
+→ `// 本轮的项保留，上一轮剩下的出队留痕：已勾过的保持 `[x]`，还开着的才降成 `[~]`。`
+2 → 1.
+
+### 51. 498
+`// 同 `(kind, target)` 只登记一次：一轮里每做完一项都要重写一次账，不能每写一次加一行。`
+→ `// 同 `(kind, target)` 只登记一次：一轮里每做完一项都要重写一次账。` 1 line.
+
+### 52. 513
+`// 本轮的项按磁盘事实定状态：有结论的进归档（`[x]` 这一轮做出来的 / `[=]` 本来就在盘上的），还欠着的留在队列里。`
+→ keep 1 line. Trim: `// 本轮的项按磁盘事实定状态：有结论的进归档，还欠着的留在队列里。` 1 line.
+
+### 53. 524-525
+```
+// 本来就没有账、这轮也没排、盘上也没有这份文件 → 不必凭空造一份空文件出来
+//（编辑器会把它列成流程产物）。文件在的话照写：上一轮的项刚被清空，用户得看得到。
+```
+→ `// 没账、没排、盘上也没这份文件就不必凭空造（编辑器会把它列成流程产物）。`
+2 → 1.
+
+### 54. 540-541
+```
+/// 队列与归档都写在 `.agent/` 下，而包刚诞生时这个目录可能还不存在
+/// （`ensure_package_skeleton` 只建 `Chapters/`）—— 代码自己保证它在。
+```
+→ `/// 队列与归档都写在 `.agent/` 下（`ensure_package_skeleton` 只建 `Chapters/`），代码自己保证它在。`
+2 → 1.
+
+### 55. 549-550
+```
+/// 先写同目录下的临时文件再改名：这一轮要写多次，撞上中断的代价是账本丢掉。
+/// 临时名是原名加 `.tmp`（`queue.md.tmp`）；不以 `.md` 结尾，产物枚举不会认它。
+```
+→ `/// 先写同目录的临时文件再改名：临时名是原名加 `.tmp`，不以 `.md` 结尾，产物枚举不会认它。`
+2 → 1.
+
+### 56. 567
+`/// 这一项的物证现在是什么状态：**打勾只给"这一轮真的做出来的"**，"本来就在盘上"（`Existing`）不算做完也不算欠。`
+→ `/// 这一项的物证现在是什么状态：打勾只给这一轮真的做出来的，`Existing` 不算做完也不算欠。` 1 line.
+
+### 57. 580 keep.
+
+### 58. 589-592 (4 lines)
+```
+/// 一份产出物算不算"这一轮做出来的"：**产出型**（转成 YAML）看 `Chapters/<id>.yaml` 在不在、**登记之后
+/// 被改过没有**（在但没动 → `Existing`：旧版本不该当场打勾，但它**不算欠**，算欠会让模型重复劳动）；
+/// **修改型**（改 YAML / 素材盘点）只有"改过"才算，否则还欠着（**不给 `Existing`**）；**稿子型**
+/// （编写剧本 / 改剧本）看**该章**在 `design.md` 或 `chapter-details.md` 里且那份登记之后被改过；**逐个章号核**、不留时间容差。
+```
+→
+```
+/// 一份产出物算不算"这一轮做出来的"：产出型（转成 YAML）看 `Chapters/<id>.yaml` 在不在、登记之后改过没有
+/// （在但没动算 `Existing`，不算欠）；修改型（改 YAML / 素材盘点）只有改过才算；稿子型（编写剧本 / 改剧本）
+/// 看该章在 `design.md` 或 `chapter-details.md` 里且登记之后被改过。
+```
+4 → 3.
+
+### 59. 607 `// 不带章号（「写大纲」「改剧本」）→ 物证就是设计稿本身，没有"章在不在"这一档`
+→ keep 1 line: `// 不带章号 → 物证就是设计稿本身，没有"章在不在"这一档` 1 line.
+### 60. 611 `// 带章号 → 这一章的内容落在**哪份稿子**里都算` → `// 带章号 → 内容落在哪份稿子里都算` 1 line.
+
+### 61. 628 keep.
+### 62. 636 
+`/// 登记时刻与文件时刻都按 Unix 纳秒比："是不是同一轮"就是一次相等比较，改动判定不留时间容差。`
+→ `/// 登记时刻与文件时刻都按 Unix 纳秒比，改动判定不留时间容差。` 1 line.
+
+### 63. 647-650 (4 lines)
+```
+/// 这份稿子里有没有点名这一章的小节（`## 第4章 · …` / `## 第4章`）。
+///
+/// 认法：只看标题行，把标题里的章节号与目标归一成"第一个数字串"再比（`04` 与 `4` 是同一章）。
+/// `design.md`（大纲）与 `chapter-details.md`（剧情）用的是同一套分节写法，所以同一个函数够用。
+```
+→
+```
+/// 这份稿子里有没有点名这一章的小节（`## 第4章`）。只看标题行，把章节号归一成第一个数字串再比
+/// （`04` 与 `4` 是同一章），大纲与剧情细节稿共用这一套分节写法。
+```
+4 → 2.
+
+### 64. 658 
+`/// 这一类的"做完"有没有物证可核对；没有的**不进账本**。章节类还要求目标非空。`
+→ `/// 这一类的"做完"有没有物证可核对；没有的不进账本。章节类还要求目标非空。` 1 line.
+
+### 65. 667 
+`/// 一项的正文（`类型标签：目标`）。视图与注入给模型的进度行共用它，两处于是永远一致。`
+→ `/// 一项的正文（`类型标签：目标`）；视图与注入给模型的进度行共用它。` 1 line.
+
+### 66. 677 `/// 队列视图 / 归档视图的头部。` keep.
+
+### 67. 685 keep (`/// 渲染一份视图：队列画"还没做完的"，归档画了结过的（行格式 `- [ ] [kind@epoch] 正文`）。`) → trim a bit: `/// 渲染一份视图（行格式 `- [ ] [kind@epoch] 正文`）。` 1 line.
+
+### 68. 705 
+`/// 读机器状态。文件不在 / 读不动 / 解析失败 → 空账：宁可从这一轮重新记，也不拿半份状态去判。`
+→ `/// 读机器状态；读不到或解析失败就给空账，不拿半份状态去判。` 1 line.
+
+### 69. 713 keep `/// 写机器状态（JSON），同样先写临时文件再改名。` 
+### 70. 720 keep `/// 归档去重只看 `(kind, target, mark)`：同一件事、同一个结论只留一行。` (trim "登记时刻不同也算同一件").
+
+### 71. 725-728 (4 lines)
+```
+/// 把了结的项搬进归档状态，再重渲染归档视图；归档只留最近 [`QUEUE_DONE_KEEP`] 条。
+///
+/// 两种项都往这儿搬：`[x]` 物证核对通过、`[~]` 没做完就被放下的（后者是**留痕**：
+/// 不执行、也不算做完，但用户日后翻得到"当时这件事没做成"）。
+```
+→
+```
+/// 把了结的项搬进归档状态并重渲染归档视图；归档只留最近 [`QUEUE_DONE_KEEP`] 条。
+/// `[x]` 与 `[~]` 都往这儿搬，后者只是留痕：不执行也不算做完，但用户日后翻得到。
+```
+4 → 2.
+
+### 72. 734-735
+```
+// 归档里已有同一结论的，不再写第二行：一轮里每做完一项都拿**同一份** `plan.items` 再写一次账，
+// 而已有结论的项已经搬走了 —— 不挡一下，同一件事会被重新登记、一行一行重复下去。
+```
+→ `// 归档里已有同一结论的不再写第二行：每做完一项都会拿同一份 `plan.items` 重写一次账，不挡就会一行行重复。`
+2 → 1.
+
+### 73. 752 keep 1 line.
+### 74. 759-760
+```
+/// 承接判断要用的事实。与 [`StageSnapshot`] 同源，但保留阶段投影会丢掉的细节。
+/// `target_exists` 只认**已落盘**的 —— 唯一看它的是「改 YAML」，改不到还没写的东西。
+```
+→ `/// 承接判断要用的事实，与 [`StageSnapshot`] 同源但保留阶段投影丢掉的细节；`target_exists` 只认已落盘的。`
+2 → 1.
+
+### 75. 772 keep 1 line.
+### 76. 779 keep 1 line.
+### 77. 796-799 (4)
+```
+/// 细节稿里有没有点名这一章的小节。落盘只负责"把已经写好的剧情转成 YAML"，
+/// 所以它要问的第一个问题就是"编剧写了没有"。
+///
+/// 与队列的物证判定共用 [`chapter_titled`]（那边的稿子型物证还要看 `design.md`）。
+```
+→
+```
+/// 细节稿里有没有点名这一章的小节；与队列的物证判定共用 [`chapter_titled`]。
+```
+4 → 1.
+
+### 78. 808-809
+```
+/// 章节号归一：取第一个数字串并去掉前导零（`04` → `4`，「第 04 章 · 标题」→ `4`）。
+/// 不含数字的（`Intro/x`、`end`）返回空串 —— 空串不参与比较，认不出就不勾前置。
+```
+→ `/// 章节号归一：取第一个数字串并去掉前导零（`04` → `4`）；不含数字的返回空串，不参与比较。`
+2 → 1.
+
+### 79. 822-823
+```
+/// 用户点名的章节 id 列表（`第 3 章` 这类口语写法归一成 `3`）。
+/// **区间与列表要拆开**：真机上 `01-04` 按"单个章节 id"查不到 → 判"还没落盘" → 整轮工具被收成只读。
+```
+→ `/// 用户点名的章节 id 列表（`第 3 章` 归一成 `3`）；区间与列表要拆开，`01-04` 必须展开成两章。`
+2 → 1.
+
+### 80. 825 keep `/// 一个区间最多展开这么多章，防止 `01-9999` 这种写法把内存撑爆。` 1 line.
+
+### 81. 844 
+`// 只有"两边都是同一宽度的数字"才当区间展开；`Intro/01-Intro/04` 这种不猜`
+→ `// 只有两边都是同宽数字才当区间展开；`Intro/01-Intro/04` 这种不猜` 1 line.
+
+### 82. 864 keep 1 line.
+### 83. 881 keep 1 line.
+### 84. 910-911
+```
+/// 交接单里的进度事实；「下一章是否已有内容」补的是删章那一脚 —— 代码只会说"还没写"。
+/// `constraints` 由 [`build_run_materials`] 读好传进来，设计稿取快照里那份：同一份事实只算一次。
+```
+→ `/// 交接单里的进度事实；`constraints` 由 [`build_run_materials`] 读好传进来，设计稿取快照里那份。`
+2 → 1.
+
+### 85. 924 
+`// 卡片里自己前后矛盾时当场说破 —— 不然模型会像真机那样连着几轮问用户按哪个走`
+→ `// 卡片里自己前后矛盾时当场说破，不然模型会连着几轮问用户按哪个走` 1 line.
+
+### 86. 948 keep 1 line.
+### 87. 979 
+`/// 已落盘的素材缺口在当前模式下意味着什么：换了模式已写好的章节不会自动重写，得把影响面摊开。`
+→ keep 1 line. Trim: `/// 已落盘的素材缺口在当前模式下意味着什么（换模式不会自动重写已写好的章节）。`
+
+### 88. 1015-1016
+```
+/// 设计稿那一行：告诉模型代码**从设计稿里读出了什么**；「设计稿在、但读不出章节 id」最坑。
+/// `design` 只回答"读没读到"（空文件仍然算读到），章节列表直接用事实层解析好的 `plan`。
+```
+→ `/// 设计稿那一行：告诉模型代码从设计稿里读出了什么。`design` 只回答读没读到（空文件也算读到），章节列表用 `plan`。`
+2 → 1.
+
+### 89. 1030 keep 1 line.
+### 90. 1049 keep 1 line.
+### 91. 1061 keep 1 line. Trim: `// 本轮各项先全登记为 Open、做完才打勾，所以这一项往往就是正在做的这项，别叫"下一项"` 1 line.
+### 92. 1064-1065
+```
+// 尾巴原本让模型"自己把那一行从队列文件里删掉"——`queue.md` 是渲染出来的、改了不生效，
+// 所以改成"说一声"。注意：这段是注入给模型的文字，改动它=改动提示词。
+```
+The "注意：这段是注入给模型的文字，改动它=改动提示词" is a constraint on editing. Keep that: `// `queue.md` 是渲染出来的、改了不生效，所以让模型说一声；这段文字会注入给模型，改动它等于改提示词。`
+2 → 1.
+
+### 93. 1116 keep 1 line.
+### 94. 1141 keep 1 line.
+### 95. 1181-1184 (4)
+```
+// ---------- 上下文预算 ----------
+// 目标只有一个：**绝不把超窗口的请求发出去换 400**：每次请求前估一次，到水位就只丢"丢了
+// 不损失能力"的东西（判据 = 能不能重取），丢完还超就由调用方**主动报错**。
+// 不设"目标水位"数字：按"无用程度"逐级丢、够用就停（多数停在第 ① 级）。
+```
+→
+```
+// ---------- 上下文预算 ----------
+//
+// 绝不把超窗口的请求发出去换 400：每次请求前估一次，到水位就只丢"丢了不损失能力"的东西
+// （判据 = 能不能重取），丢完还超就由调用方主动报错。
+```
+4 → 4. Hmm, no reduction. Let me do:
+```
+// ---------- 上下文预算 ----------
+// 绝不把超窗口的请求发出去换 400：到水位就按"能不能重取"逐级丢，丢完还超由调用方主动报错。
+```
+4 → 2. Good.
+
+### 96. 1186 
+`/// 单次请求给模型**输出**留的余量上限（不是定值）：实际预留取 `min(128K, 窗口/8)`，见 [`input_cap`]。`
+→ `/// 输出余量的上限（不是定值）：实际预留取 `min(128K, 窗口/8)`，见 [`input_cap`]。` 1 line.
+
+### 97. 1189-1190
+```
+/// 窗口读不到时的兜底：官方文档与 `/models` 都写 1,048,576（1M）。宁可少收束也不丢记忆，
+/// 真超限时由第 ③ 级的主动报错兜住（[`BudgetOutcome::TooLong`]）。
+```
+→ `/// 窗口读不到时的兜底（官方文档与 `/models` 都写 1,048,576）；真超限由 [`BudgetOutcome::TooLong`] 兜住。`
+2 → 1.
+
+### 98. 1197 keep 1 line.
+### 99. 1200-1201
+```
+/// 估算 token：CJK 按 0.85 token/字，其余按 0.3；每条消息再加 4 的结构开销。
+/// **故意估高**：估高只是早一点收束（无害），估低就会撞窗口（致命）。
+```
+→ `/// 估算 token：CJK 按 0.85 token/字，其余按 0.3，每条消息加 4；故意估高（估低会撞窗口）。`
+2 → 1.
+
+### 100. 1221 keep 1 line.
+### 101. 1244 
+`/// 丢到不能再丢仍然超硬线 —— **调用方必须主动报错，不许发请求**。`
+→ keep 1 line: `/// 丢到不能再丢仍然超硬线：调用方必须主动报错，不许发请求。` 1 line.
+
+### 102. 1281-1282
+```
+/// 按窗口收束一次，到水位才动手；丢不下去返回 [`BudgetOutcome::TooLong`]。顺序（先丢最不可惜的）：
+/// ① 旧的只读工具结果折成一行 —— 随时可重取；② 更早的轮次压成一行摘要 —— user 原话保留原文。
+```
+→ `/// 按窗口收束一次：先折旧的只读结果（可重取），再压更早的轮次（user 原话保留）；丢不下去返回 [`BudgetOutcome::TooLong`]。`
+2 → 1.
+
+### 103. 1292 keep 1 line.
+### 104. 1298 
+`// 没找到可丢的、也没超硬线 → 原样发；水位只是"开始找可丢的东西"的线，不是命令。`
+→ keep 1 line. Trim: `// 没找到可丢的也没超硬线 → 原样发；水位只是"开始找可丢的东西"的线，不是命令。` 1 line.
+
+### 105. 1332 
+`/// 输入硬线：窗口减去输出余量，预留取 `min(128K, 窗口/8)`，**必须随窗口缩小**（定值会把 200k 压到 72k）。`
+→ `/// 输入硬线：窗口减去输出余量；预留必须随窗口缩小（定值会把 200k 压到 72k）。` 1 line.
+
+### 106. 1338 keep 1 line.
+### 107. 1392 keep 1 line.
+### 108. 1406-1407
+```
+/// ① 把保护区之外的旧只读结果折成一行。只换 `content`，**不删消息** ——
+/// `assistant(tool_calls)` 与它的 `tool` 回应必须成对，删了就 400。
+```
+→ `/// ① 把保护区之外的旧只读结果折成一行。只换 `content`、不删消息：`assistant(tool_calls)` 与它的 `tool` 回应必须成对。`
+2 → 1.
+
+### 109. 1434 
+`/// ② 把保护区之外的每一轮压成一行摘要：**user 原话保留原文**，其余合并成一条 assistant 摘要。`
+→ keep 1 line, drop bold: `/// ② 把保护区之外的每一轮压成一行摘要：user 原话保留原文，其余合并成一条 assistant 摘要。` 1 line.
+
+### 110. 1443 keep 1 line.
+### 111. 1470 keep 1 line.
+### 112. 1516-1521 (6)
+```
+/// 从剧本包内任意写入路径反推 key —— 会话绑定 / 归属反推 / 外来包拦截三个调用点共用这一个入口。
+///
+/// 先按**三类锚点**认包根（`.agent/`、`Chapters/`、`story_config.yaml` 之前的那段路径），
+/// 不要求那个包已被枚举到：新建剧本的中间态"只有 `.agent/design.md`、还没建工程"认不出来
+/// → 会话不绑 script_key → `derive` 退化成 Routing、整套自检失效。
+/// 三类锚点都不沾的（包根下的散文件）再按"已知剧本包列表"最长匹配；`known` 空就只走锚点。
+```
+→
+```
+/// 从剧本包内任意写入路径反推 key，会话绑定 / 归属反推 / 外来包拦截三个调用点共用这一个入口。
+/// 先按三类锚点认包根（`.agent/`、`Chapters/`、`story_config.yaml` 之前那段路径），不要求包已被枚举到：
+/// 新建剧本"只有 `.agent/design.md`、还没建工程"的中间态认不出来的话，会话就不绑 script_key、自检全失效。
+/// 锚点都不沾的再按已知剧本包列表最长匹配；`known` 空就只走锚点。
+```
+6 → 4.
+
+### 113. 1538 keep 1 line.
+### 114. 1554 keep 1 line.
+### 115. 1559-1560
+```
+/// 这个剧本用不用人物卡 —— 决定交接单里要不要带角色卡模式那一行。
+/// 三种情况都算用：已声明模式、角色卡羁绊冒险、仓库里已建 `characters/`。
+```
+→ `/// 这个剧本用不用人物卡（决定交接单里要不要带角色卡模式那一行）：已声明模式、角色卡羁绊冒险、已建 `characters/` 都算用。`
+2 → 1.
+
+### 116. 1579 keep 1 line.
+### 117. 1615-1616
+```
+/// 章节写入后的轻量自检；不适用或无问题时返回 `None`。不做整剧本校验（未写完时的断链诊断
+/// 会误导模型去补后续章节），但素材当场就能定论。`data_dir` 由调用方给，判定逻辑才测得动。
+```
+→ `/// 章节写入后的轻量自检，不适用或无问题返回 `None`：不做整剧本校验（断链诊断会误导模型去补后续章节），但素材当场能定论。`
+2 → 1.
+
+### 118. 1626 keep 1 line.
+### 119. 1630 keep 1 line.
+### 120. 1659 keep 1 line.
+### 121. 1685 keep 1 line.
+### 122. 1710 keep 1 line.
+### 123. 1728 keep 1 line.
+### 124. 1746 keep 1 line.
+### 125. 1777 keep 1 line.
+### 126. 1828 keep 1 line.
+
+Now let me tally the reductions:
+1. 7→4 (-3)
+3. 1→1 (0)
+4. 2→1 (-1)
+5. 1→1
+6. 1→1
+7. 1→1
+8. 1→1
+9. 1→1
+10. 1→1
+11. 1→1
+12. 2→1 (-1)
+13. 3→1 (-2)
+14. 3→1 (-2)
+15. 1→1
+16. 1→1
+17. 1→1
+18. 1→1
+19. 1→1
+20. 1→1
+21. 1→1
+22. 1→1
+23. 1→1
+24. 2→1 (-1)
+25. 2→1 (-1)
+26. 1→1
+27. 2→1 (-1)
+28. 3→1 (-2)
+29. 2→1 (-1)
+30. 2→1 (-1)
+31. 2→1 (-1)
+32. 2→0 (-2)
+33. 2→1 (-1)
+34. 1→1
+35. 1→1
+36. 3→1 (-2)
+37. 1→1
+38. 1→1
+39. 1→1
+40. 10→5 (-5)
+41. 1→1
+42. 2→1 (-1)
+43. 1→1
+44. 1→1
+45. 1→1
+46. 1→1
+47. 1→1
+48. 2→1 (-1)
+49. 8→3 (-5)
+50. 2→1 (-1)
+51. 1→1
+52. 1→1
+53. 2→1 (-1)
+54. 2→1 (-1)
+55. 2→1 (-1)
+56. 1→1
+57. 1→1
+58. 4→3 (-1)
+59. 1→1
+60. 1→1
+61. 1→1
+62. 1→1
+63. 4→2 (-2)
+64. 1→1
+65. 1→1
+66. 1→1
+67. 1→1
+68. 1→1
+69. 1→1
+70. 1→1
+71. 4→2 (-2)
+72. 2→1 (-1)
+73. 1→1
+74. 2→1 (-1)
+75. 1→1
+76. 1→1
+77. 4→1 (-3)
+78. 2→1 (-1)
+79. 2→1 (-1)
+80. 1→1
+81. 1→1
+82. 1→1
+83. 1→1
+84. 2→1 (-1)
+85. 1→1
+86. 1→1
+87. 1→1
+88. 2→1 (-1)
+89-94: mostly 1→1, 92: 2→1 (-1)
+95. 4→2 (-2)
+96. 1→1
+97. 2→1 (-1)
+98. 1→1
+99. 2→1 (-1)
+100. 1→1
+101. 1→1
+102. 2→1 (-1)
+103. 1→1
+104. 1→1
+105. 1→1
+106-107: 1→1
+108. 2→1 (-1)
+109. 1→1
+110-111: 1→1
+112. 6→4 (-2)
+113-116: 1→1, 115: 2→1 (-1)
+117. 2→1 (-1)
+118-126: 1→1
+
+Total reduction: let me sum the negatives:
+3+1+1+2+2+1+1+1+1+2+1+1+1+2+1+2+5+1+1+1+5+1+1+1+1+1+1+1+2+1+1+2+1+1+1+3+1+1+1+1+2+1+1+1+1+2+1+1+1+1+1 = let's add carefully:
+
+-3 (mod doc)
+-1 (31-32) → 4
+-1 (58-59) → 5
+-2 (94-96) → 7
+-2 (99-101) → 9
+-1 (192-193) → 10
+-1 (219-220) → 11
+-1 (225-226) → 12
+-2 (228-230) → 14
+-1 (234-235) → 15
+-1 (254-255) → 16
+-1 (269-270) → 17
+-2 (292-293) → 19
+-1 (301-302) → 20
+-2 (324-326) → 22
+-5 (412-421) → 27
+-1 (429-430) → 28
+-1 (454-455) → 29
+-5 (459-466) → 34
+-1 (474-475) → 35
+-1 (524-525) → 36
+-1 (540-541) → 37
+-1 (549-550) → 38
+-1 (589-592) → 39
+-2 (647-650) → 41
+-2 (725-728) → 43
+-1 (734-735) → 44
+-1 (759-760) → 45
+-3 (796-799) → 48
+-1 (808-809) → 49
+-1 (822-823) → 50
+-1 (910-911) → 51
+-1 (1015-1016) → 52
+-1 (1064-1065) → 53
+-2 (1181-1184) → 55
+-1 (1189-1190) → 56
+-1 (1200-1201) → 57
+-1 (1281-1282) → 58
+-1 (1406-1407) → 59
+-2 (1516-1521) → 61
+-1 (1559-1560) → 62
+-1 (1615-1616) → 63
+
+So 205 - 63 = 142. That's only a 31% reduction. Not enough! Target is >50% reduction.
+
+Hmm. I need to be much more aggressive. I need to delete many one-liners entirely.
+
+Let me reconsider. The rule 4 says "代码本身已经说清楚的注释整条删掉" and rule 6 says constraint comments must be kept but only one sentence.
+
+The 205 count includes 7 module doc lines + many `///` one-liners on constants/variants that are arguably self-evident.
+
+To get below ~100, I need to delete ~105 lines. Currently I only delete/trim 63. I need ~42+ more lines cut.
+
+Let me look for candidates for complete deletion among the one-liners:
+
+- 21: `/// 流程产物目录。点号目录不进引擎扫描与编辑器枚举；「详情」浮窗直接列这一层。` → constraint-ish (why dot dir). Could trim to `/// 流程产物目录：点号目录不进引擎扫描与编辑器枚举。` Keep 1.
+- 26: `/// 章节细节稿（按章分节）：正式产物，改完要对齐设计稿。` keep 1.
+- 35: `/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。` — hmm, could DELETE since QUEUE_DONE_REL_PATH name + value is `.agent/queue-done.md`. But "不注入提示词" is a constraint. Keep 1.
+- 41: `/// 归档的机器状态，与 [`QUEUE_JSON_REL_PATH`] 同构，只装着了结过的项。` — self-evident from name QUEUE_DONE_JSON_REL_PATH. DELETE. (-1)
+- 44: `/// 归档保留条数上限：这是给人回看的流水，不该无限长。` — QUEUE_DONE_KEEP = 50, name self-evident. DELETE. (-1)
+- 50: `/// 视图里的登记时刻只到秒（`[write_chapter@1790664196]`）；状态里存的是完整时刻（纳秒）。` — NANOS_PER_SEC name + usage self-evident-ish. But the `[write_chapter@...]` example is useful. Trim → `/// 视图里的登记时刻只到秒。` Actually could DELETE. Hmm. It explains the constant. `NANOS_PER_SEC` is self-evident. DELETE. (-1)
+- 55: `/// 自动骨架的标记行。`progress_block` 靠它判断"这份配置还没被补全"。` — explains SKELETON_MARKER usage. Could keep 1 or delete. The value string shows it. `progress_block` usage is a real cross-ref. Trim → `/// 自动骨架的标记行，`progress_block` 靠它判断配置有没有被补全。` Keep 1.
+- 104,108,111: variant docs. `/// 没绑定剧本（[`derive`] 的默认值）；绑了 key 但包或可解析的计划还没有时是 [`Stage::Setup`]。` — this is non-obvious (Routing is default but Setup is used when...). Keep. 108 `/// 设计稿已声明章节，但尚未写完。` for Forge — could DELETE (name Forge unclear though). Hmm, minimal info; the enum is documented at top. I'd delete 108 and 111? 111 `/// 有剧本包、无设计稿、且已有章节：修改既有剧本。` for Modify — name is fairly clear. Hmm.
+
+This is getting into judgment. Given the requirement, let me be more decisive: delete doc comments where the item name plus the module-level doc already convey it, keep only the constraint ones.
+
+Let me reconsider the whole set with a stricter eye. Target ≤ 100 lines.
+
+Actually, wait. Let me reconsider whether the "本分支新增的注释行" count should include the whole file. The task says "你负责文件里本分支新增的注释行数明显下降（争取砍掉一半以上）". Since the file is entirely new, yes all 205.
+
+Hmm, but hold on. Let me re-read: "判定方法（在仓库根目录跑）：git diff -U0 origin/dev 50717d10 -- <file>". And "输出里以 `+` 开头、且属于注释的行，才是你可以改的". So all 205. OK.
+
+So I need ≤ ~100. Let me aim for ~85-95.
+
+Let me be aggressive but still preserve: path gates, responsibility boundaries, why same-turn, why a tool is withheld, why a field must be computed that way. Those are the mandatory ones.
+
+Let me go through and decide more sharply. I'll aim for exactly one line max for each kept comment, and delete many.
+
+Let me redo the list with a decision for every comment group, targeting a total around 90.
+
+Group list (original line ranges) → new line count:
+
+1. Module doc 1-7 (7) → 4 (keep: purpose, derivation, injection-by-task) 
+2. 21 (1) → 1 (why dot dir)
+3. 26 (1) → 1 (正式产物)
+4. 31-32 (2) → 1
+5. 35 (1) → 1
+6. 38 (1) → 1 (真相在这里 = constraint)
+7. 41 (1) → 0 DELETE
+8. 44 (1) → 0 DELETE
+9. 47 (1) → 1 (空目标占位)
+10. 50 (1) → 0 DELETE
+11. 55 (1) → 1
+12. 58-59 (2) → 1
+13. 94-96 (3) → 1
+14. 99-101 (3) → 1
+15. 104 (1) → 1
+16. 108 (1) → 0 DELETE
+17. 111 (1) → 0 DELETE
+18. 120 (1) → 1
+19. 127 (1) → 1
+20. 148 (1) → 0 DELETE? `// 包还不存在 → 创建流程` — explains why Setup. The code `let Ok(script_dir) = ... else { Stage::Setup }` — actually there's a non-obvious reason: resolve failed → Setup (not Routing). Keep? It's short and explanatory. Keep 1.
+21. 157 (1) → 1
+22. 162 (1) → 1
+23. 184 (1) → 1
+24. 192-193 (2) → 1
+25. 219-220 (2) → 1
+26. 223 (1) → 1
+27. 225-226 (2) → 1
+28. 228-230 (3) → 1
+29. 234-235 (2) → 1
+30. 254-255 (2) → 1
+31. 269-270 (2) → 1
+32. 292-293 (2) → 0 DELETE
+33. 301-302 (2) → 1
+34. 311 (1) → 1
+35. 316 (1) → 1
+36. 324-326 (3) → 1
+37. 335 (1) → 1
+38. 343 (1) → 1
+39. 401 (1) → 1
+40. 412-421 (10) → 5
+41. 423 (1) → 1
+42. 429-430 (2) → 1
+43. 432 (1) → 1
+44. 436 (1) → 1
+45. 448 (1) → 1
+46. 450 (1) → 1
+47. 452 (1) → 1
+48. 454-455 (2) → 1
+49. 459-466 (8) → 3
+50. 474-475 (2) → 1
+51. 498 (1) → 1
+52. 513 (1) → 1
+53. 524-525 (2) → 1
+54. 540-541 (2) → 1
+55. 549-550 (2) → 1
+56. 567 (1) → 1
+57. 580 (1) → 1
+58. 589-592 (4) → 3
+59. 607 (1) → 1
+60. 611 (1) → 1
+61. 628 (1) → 1
+62. 636 (1) → 1
+63. 647-650 (4) → 2
+64. 658 (1) → 1
+65. 667 (1) → 1
+66. 677 (1) → 0 DELETE (const names QUEUE_HEADER/QUEUE_DONE_HEADER self-evident)
+67. 685 (1) → 1
+68. 705 (1) → 1
+69. 713 (1) → 0 DELETE (write_state name is clear)
+70. 720 (1) → 1
+71. 725-728 (4) → 2
+72. 734-735 (2) → 1
+73. 752 (1) → 1
+74. 759-760 (2) → 1
+75. 772 (1) → 1
+76. 779 (1) → 1
+77. 796-799 (4) → 1
+78. 808-809 (2) → 1
+79. 822-823 (2) → 1
+80. 825 (1) → 1
+81. 844 (1) → 1
+82. 864 (1) → 1
+83. 881 (1) → 1
+84. 910-911 (2) → 1
+85. 924 (1) → 1
+86. 948 (1) → 1
+87. 979 (1) → 1
+88. 1015-1016 (2) → 1
+89. 1030 (1) → 0 DELETE (config_line is self-evident? The reason "不说清的话，模型会以为工程已建好" is a why-comment. Hmm. It's about the injected text. Keep? I'll DELETE — the strings below explain themselves.) → 0
+90. 1049 (1) → 1
+91. 1061 (1) → 1
+92. 1064-1065 (2) → 1
+93. 1116 (1) → 1
+94. 1141 (1) → 1
+95. 1181-1184 (4) → 2
+96. 1186 (1) → 1
+97. 1189-1190 (2) → 1
+98. 1197 (1) → 0 DELETE (KEEP_RECENT_TURNS = 2, name self-evident)
+99. 1200-1201 (2) → 1
+100. 1221 (1) → 1
+101. 1244 (1) → 1
+102. 1281-1282 (2) → 1
+103. 1292 (1) → 0 DELETE (code: recent_turns_start(messages, KEEP_RECENT_TURNS) is self-evident)
+104. 1298 (1) → 1
+105. 1332 (1) → 1
+106. 1338 (1) → 1
+107. 1392 (1) → 1
+108. 1406-1407 (2) → 1
+109. 1434 (1) → 1
+110. 1443 (1) → 1
+111. 1470 (1) → 1
+112. 1516-1521 (6) → 3
+113. 1538 (1) → 1
+114. 1554 (1) → 1
+115. 1559-1560 (2) → 1
+116. 1579 (1) → 1
+117. 1615-1616 (2) → 1
+118. 1626 (1) → 1
+119. 1630 (1) → 1
+120. 1659 (1) → 0 DELETE? `// 零素材：不该引用任何素材，所以不必逐条报"找不到"——有引用本身就是错` — this is a why-comment for the branch. Keep 1. 
+121. 1685 (1) → 1
+122. 1710 (1) → 1
+123. 1728 (1) → 0 DELETE (`appearing_cast` name + body self-evident). Actually "不按事件类型硬编码，扫键更不易漏" is a design rationale. Keep 1? I'll delete to save budget... but it's a legit why. Hmm. Let me keep it as is (1) to be safe. Actually I need the reduction. Let me delete it — the function body clearly reads `character` from each event. DELETE. → 0
+124. 1746 (1) → 1
+125. 1777 (1) → 1
+126. 1828 (1) → 1
+
+Now sum new counts:
+1:4
+2:1 →5
+3:1 →6
+4:1 →7
+5:1 →8
+6:1 →9
+7:0 →9
+8:0 →9
+9:1 →10
+10:0 →10
+11:1 →11
+12:1 →12
+13:1 →13
+14:1 →14
+15:1 →15
+16:0 →15
+17:0 →15
+18:1 →16
+19:1 →17
+20:1 →18
+21:1 →19
+22:1 →20
+23:1 →21
+24:1 →22
+25:1 →23
+26:1 →24
+27:1 →25
+28:1 →26
+29:1 →27
+30:1 →28
+31:1 →29
+32:0 →29
+33:1 →30
+34:1 →31
+35:1 →32
+36:1 →33
+37:1 →34
+38:1 →35
+39:1 →36
+40:5 →41
+41:1 →42
+42:1 →43
+43:1 →44
+44:1 →45
+45:1 →46
+46:1 →47
+47:1 →48
+48:1 →49
+49:3 →52
+50:1 →53
+51:1 →54
+52:1 →55
+53:1 →56
+54:1 →57
+55:1 →58
+56:1 →59
+57:1 →60
+58:3 →63
+59:1 →64
+60:1 →65
+61:1 →66
+62:1 →67
+63:2 →69
+64:1 →70
+65:1 →71
+66:0 →71
+67:1 →72
+68:1 →73
+69:0 →73
+70:1 →74
+71:2 →76
+72:1 →77
+73:1 →78
+74:1 →79
+75:1 →80
+76:1 →81
+77:1 →82
+78:1 →83
+79:1 →84
+80:1 →85
+81:1 →86
+82:1 →87
+83:1 →88
+84:1 →89
+85:1 →90
+86:1 →91
+87:1 →92
+88:1 →93
+89:0 →93
+90:1 →94
+91:1 →95
+92:1 →96
+93:1 →97
+94:1 →98
+95:2 →100
+96:1 →101
+97:1 →102
+98:0 →102
+99:1 →103
+100:1 →104
+101:1 →105
+102:1 →106
+103:0 →106
+104:1 →107
+105:1 →108
+106:1 →109
+107:1 →110
+108:1 →111
+109:1 →112
+110:1 →113
+111:1 →114
+112:3 →117
+113:1 →118
+114:1 →119
+115:1 →120
+116:1 →121
+117:1 →122
+118:1 →123
+119:1 →124
+120:1 →125
+121:1 →126
+122:1 →127
+123:0 →127
+124:1 →128
+125:1 →129
+126:1 →130
+
+Hmm, 130. Not ≤100. Wait — my original per-group tally gave 205 total; let me verify: sum of original counts should be 205.
+
+Let me sum originals:
+7+1+1+2+1+1+1+1+1+1+1+2+3+3+1+1+1+1+1+1+1+1+1+2+2+1+2+3+2+2+2+2+2+1+1+3+1+1+1+10+1+2+1+1+1+1+1+2+8+2+1+1+2+2+2+1+1+4+1+1+1+1+4+1+1+1+1+1+1+1+1+4+2+1+1+2+1+1+4+2+2+1+1+1+2+1+1+1+2+1+1+2+1+1+4+1+2+1+2+1+1+2+1+1+1+1+2+1+1+6+1+1+2+1+2+1+1+1+1+1+1+1+1
+
+That's tedious. Let me trust 205 and just accept that my plan gives ~130. Need to cut 30 more.
+
+Hmm. Wait, but maybe my tally of group origins is right = 205. Then reductions: 205-130 = 75, = 37%. Still short of 50%.
+
+To reach ≤102 I need 28 more lines cut. Let me find more aggressive deletions among the 1→1 keeps.
+
+Candidates to delete entirely (self-evident from code/name):
+- 2 (21) `/// 流程产物目录。点号目录不进引擎扫描与编辑器枚举；「详情」浮窗直接列这一层。` → This is a real constraint (why `.agent`). Keep. Hmm.
+- 3 (26) `/// 章节细节稿（按章分节）：正式产物，改完要对齐设计稿。` keep 1 (constraint: 对齐设计稿).
+- 5 (35) `/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。` — delete? The "不注入提示词" is a constraint. Keep.
+- 6 (38) `/// 队列的机器状态（真相在这里）...` — could shorten or delete. The distinction state vs view is important. Keep.
+- 9 (47) `/// 空目标的占位写法...` — NO_TARGET = "（未指明）". Could delete. DELETE → -1
+- 11 (55) `/// 自动骨架的标记行...` — delete? SKELETON_MARKER value is the marker text; usage in progress_block. I'd delete. DELETE → -1
+- 15 (104) Stage::Routing doc — non-obvious. Keep.
+- 18 (120) `/// 设计稿全文（`None` = 读不到）...` — keep (only-read-once constraint).
+- 19 (127) `/// 下一个待写章节 id（仅 [`Stage::Forge`] 有意义）。` — keep? It's a useful constraint on when it matters. Keep.
+- 20 (148) `// 包还不存在 → 创建流程` — hmm, could keep. Actually resolve_script_dir failing → Setup. It's short & explains. Keep.
+- 21 (157) keep
+- 22 (162) `// 无设计稿：已有章节说明是既存剧本，否则还在设计与大纲阶段` — explains branch. Keep? Could delete since the code reads clearly. Hmm, the code: `if written.is_empty() { Setup } else { Modify }`. Fairly clear. DELETE → -1
+- 23 (184) `/// 追加一段行为要求（前导空行 + 全文）；空的不注入。` — delete? push_directive body is clear. DELETE → -1
+- 26 (223) `/// 队列里被跳过的项（做不了），让模型在回执里说明。` — public struct field doc, explains purpose. Keep? It's a field on TaskBlockInput. Could delete. DELETE → -1
+- 34 (311) `// 用户这一轮的原话：任务名是从这句话判出来的，一句话里顺手捎带的别的事会漏掉。` — why. Keep 1.
+- 35 (316) `// 「写」还是「落盘」：这一段两个 Agent 都要看到，口径不一致时最先崩的是用户。` — keep.
+- 37 (335) `// 队列是这一轮的工作清单：只给一行"还剩几项"不够 —— 模型会做完手上这件就收尾。` — keep.
+- 38 (343) `// 「换了前置」那一格：...` — keep.
+- 39 (401) `// 仅对话：连手册都不给，免得它顺手把剧本的事也做了` — keep.
+- 44 (436) `/// `TaskKind` 归 `role.rs` 所有（不在那儿派生 serde），JSON 里只存它的 key。` — this is a why-comment for kind_key/parse_kind. Keep.
+- 45 (448) `/// `- [ ]` 这一轮排的，还没做完。` — Mark::Open. Could delete (name clear). DELETE → -1
+- 46 (450) `/// `- [x]` 这一轮真的做出来了（物证在登记之后被改写过）。` — the parenthetical is important (why Done means changed). Keep.
+- 47 (452) Existing doc — keep (not obvious).
+- 56 (567) Evidence doc — keep.
+- 57 (580) `/// 归档时打的记号（还欠着的 `Open` 不进归档）。` — delete? `mark()` maps Done→Done, _→Existing. The comment explains. DELETE → -1
+- 59 (607) `// 不带章号（「写大纲」「改剧本」）→ 物证就是设计稿本身...` — keep? It explains an early return. Keep.
+- 60 (611) `// 带章号 → 这一章的内容落在**哪份稿子**里都算` — could delete (loop over two paths is clear). DELETE → -1
+- 61 (628) `/// 这一份文件在 `at`（这一项的登记时刻）之后被改过吗。` — function name changed_after + signature clear. DELETE → -1
+- 62 (636) `/// 登记时刻与文件时刻都按 Unix 纳秒比：...改动判定不留时间容差。` — keep (why nanos).
+- 64 (658) `/// 这一类的"做完"有没有物证可核对；没有的**不进账本**。章节类还要求目标非空。` — keep (constraint).
+- 65 (667) `/// 一项的正文（`类型标签：目标`）。视图与注入给模型的进度行共用它，两处于是永远一致。` — trim to 1... could delete. The function body is `format!("{}：{}", entry.kind.label(), target)`. DELETE → -1
+- 66 deleted already.
+- 67 (685) `/// 渲染一份视图：队列画"还没做完的"，归档画了结过的（行格式...）` — delete? render_view is self-evident. But the row format is useful. Trim to `/// 行格式 `- [ ] [kind@epoch] 正文`。` 1 line. Keep as 1.
+- 68 (705) `/// 读机器状态。文件不在 / 读不动 / 解析失败 → 空账：宁可从这一轮重新记，也不拿半份状态去判。` — the design decision is worth 1 line. Keep.
+- 70 (720) `/// 归档去重只看 `(kind, target, mark)`：同一件事、同一个结论只留一行` — keep 1.
+- 73 (752) `/// 流程总纲全文（流程 Agent 每轮都用它判断流程走到哪）；读不到返回 `None`，调用方应**回落**。` — keep 1.
+- 75 (772) `// 「文件在」与「读得出章节」是两件事：前者决定能不能改它，后者只是格式提醒，别当前置用。` — keep (constraint).
+- 76 (779) `// 落盘的前置：编剧有没有把点名的这一章写成剧情细节稿（见 role::reconcile）。` — keep.
+- 80 (825) `/// 一个区间最多展开这么多章，防止 `01-9999` 这种写法把内存撑爆。` — keep 1.
+- 81 (844) `// 只有"两边都是同一宽度的数字"才当区间展开；...` — keep 1.
+- 82 (864) `/// `第 3 章` / `03节` / `"03"` → `03`（去空白与引号，剥掉"第/章/节"）。` — keep 1? Could delete — function name normalize_chapter_token + body clear. DELETE → -1
+- 83 (881) `// 约束卡在这里读一次、往下**传文本**；设计稿用快照里那份（事实层只读一次盘）。` — keep (only-read-once).
+- 85 (924) keep.
+- 86 (948) `// 换模式的影响面：已落盘的章节不会跟着重写，所以先把要改的地方摊开` — keep 1.
+- 87 (979) keep.
+- 90 (1049) `/// 队列里还欠着的事。**从机器状态算**（`[=]` 不算欠、早已归档）。` — keep 1.
+- 91 (1061) `// 本轮各项先全登记为 Open、做完一项才打勾，所以这一项往往就是"正在做的这项"，别叫"下一项"` — keep 1.
+- 93 (1116) `/// 取章节末尾的注释块，即 `SKILL.md`「状态注释原则」要求记录的收尾状态。` — keep (cross-ref).
+- 94 (1141) `/// 丢弃已被超越的章节写入轮次，避免历史里堆积整章 YAML；整轮丢弃以保持历史结构合法。` — keep 1 (why whole-turn).
+- 96 (1186) keep.
+- 98 (1197) deleted.
+- 100 (1221) `// 工具参数也要算：整章 YAML 就在 arguments 里` — keep 1.
+- 101 (1244) keep.
+- 104 (1298) `// 没找到可丢的、也没超硬线 → 原样发；水位只是"开始找可丢的东西"的线，不是命令。` — keep 1.
+- 105 (1332) keep.
+- 106 (1338) `/// 从末尾往前数 `keep` 个"轮"的起点下标；第 0 条（system）与第一个 user 之前的内容永远在保护区。` — keep 1.
+- 107 (1392) `/// 只读、且**随时可以再读一次**的工具 —— 结果丢了不损失能力。` — keep 1.
+- 109 (1434) `/// ② 把保护区之外的每一轮压成一行摘要：user 原话保留原文，其余合并成一条 assistant 摘要。` — keep 1.
+- 110 (1443) `// 只有一句 user 话、背后没有任何动作的"回合"没有可压的东西，压缩纯属噪音。` — keep 1.
+- 111 (1470) keep.
+- 113 (1538) `// key 层级不固定：按已知剧本包列表最长匹配（同长度取 `known` 里靠前的那个）` — keep 1.
+- 114 (1554) `/// 本会话这个剧本生效的素材模式。解析只此一处（`utils::script_modes`），**整剧校验与章节自检共用**。` — keep 1.
+- 116 (1579) `/// 本章引用了但磁盘上没有的素材名（先预留模式下只登记，不阻断）。` — keep 1.
+- 118 (1626) keep 1.
+- 119 (1630) keep 1.
+- 120 (1659) keep 1.
+- 121 (1685) keep 1.
+- 122 (1710) keep 1.
+- 124 (1746) keep 1.
+- 125 (1777) keep 1.
+- 126 (1828) keep 1.
+
+New deletions found: 9(47), 11(55), 22(162), 23(184), 26(223), 45(448), 57(580), 60(611), 61(628), 65(667), 82(864) = 11 more lines. 130-11 = 119. Still not ≤102.
+
+I need another 17. Hmm.
+
+Hmm. Let me reconsider — maybe I'm being too conservative. Let me reconsider some "1→1 keeps" that could go to 0:
+
+- 2 (21): `/// 流程产物目录。点号目录不进引擎扫描与编辑器枚举；「详情」浮窗直接列这一层。` DELETE. The `.agent` dot-dir rationale is helpful but arguably not essential. Hmm... but it's exactly a "why this path" comment. I'll trim to `/// 流程产物目录：点号目录不进引擎扫描与编辑器枚举。` = 1. Not deletion.
+
+Hmm, I need more aggressive stance on the many 1-liners that merely restate the function name:
+
+- 17 (127) `/// 下一个待写章节 id（仅 [`Stage::Forge`] 有意义）。` — DELETE (-1)
+- 18 (120) `/// 设计稿全文（`None` = 读不到）。事实层只读一次盘：这里读过之后不再各自重读。` — keep (only-read-once constraint)
+- 25 (219-220) → 1, keep
+- 33 (301-302) → 1, keep
+- 41 (423) `/// 账本里的一项，只在本轮有效。JSON 里就是这四个字段。` — could DELETE (-1). Hmm, "只在本轮有效" is a constraint. Keep.
+
+Hmm, honestly, hitting >50% on a file where a third of the comments are already single-line constraints is hard. Let me recount: of 205 lines, how many are in multi-line blocks that I compress? My compression saves 63-ish. The remaining 1-liners are ~145 lines... wait no.
+
+Let me recount more carefully. Actually my group tally: total original = sum. Let me actually compute the sum properly with a script to make sure 205 is right and to see distribution.
+
+Actually simpler: let me just be very aggressive and delete more 1-liners. Target ~95.
+
+Additional deletions (each -1):
+a. 21 (流程产物目录) → keep trimmed... DELETE? I'll keep. Hmm.
+
+OK let me think about which 1-liners genuinely carry constraint value vs. restate code:
+
+DELETE candidates (restate code or name):
+1. 41 `/// 归档的机器状态。与 [`QUEUE_JSON_REL_PATH`] 同构，只是装着了结过的项。` (done)
+2. 44 `/// 归档保留条数上限：这是给人回看的流水，不该无限长。` (done)
+3. 50 `/// 视图里的登记时刻只到秒...` (done)
+4. 47 NO_TARGET (done)
+5. 55 SKELETON_MARKER (done)
+6. 104? keep
+7. 108 Forge `/// 设计稿已声明章节，但尚未写完。` (done)
+8. 111 Modify (done)
+9. 148 `// 包还不存在 → 创建流程` — DELETE? Hmm, wait: the `else` branch returns Setup when resolve fails. Without the comment it looks like resolve failure → Setup which is intentional. Keep 1... Actually I'll delete: the code `let Ok(script_dir) = ... else { return StageSnapshot { stage: Stage::Setup, ...} }` is clear enough? Honestly the comment explains "包还不存在" which is the reason resolve fails. It's genuinely useful. Keep.
+10. 162 (done)
+11. 184 (done)
+12. 223 (done)
+13. 311 `// 用户这一轮的原话：任务名是从这句话判出来的，一句话里顺手捎带的别的事会漏掉。` — hmm, this explains why user_msg is injected. Keep.
+14. 316 `// 「写」还是「落盘」：...` keep
+15. 343 `// 「换了前置」那一格：...` — could merge into the 254-255 comment. Both about prerequisite. Combine: put one comment before `if plan.items.len() > 1`. Then delete 343 (-1). Good.
+16. 401 keep
+17. 448 Mark::Open (done)
+18. 450 `- [x]` (keep - parenthetical needed)
+19. 452 (keep)
+20. 567 (keep)
+21. 580 (done)
+22. 607 `// 不带章号（「写大纲」「改剧本」）→ 物证就是设计稿本身，没有"章在不在"这一档` — DELETE? It explains why key.is_empty() → design only. Keep 1... I'll delete since the code is `if key.is_empty() { return changed_after(design) }` which is fairly clear. DELETE (-1)
+23. 611 (done)
+24. 628 (done)
+25. 636 keep? `/// 登记时刻与文件时刻都按 Unix 纳秒比："是不是同一轮"就是一次相等比较，改动判定不留时间容差。` — explains why nanos. Keep 1. Hmm, epoch_nanos name + body clear. DELETE (-1)? The "不留时间容差" is a real design decision. Keep.
+
+Hmm, I'm hovering. Let me take a different approach: accept ~100-110 and consider whether "明显下降" and "争取砍掉一半以上" is a soft target ("争取" = strive for). It says target: 明显下降 (争取砍掉一半以上). So 50% is aspirational. But the hard rule #4 says "尽量短". Getting to ~45% reduction might be acceptable if quality is good. Still, let me push to ~50%.
+
+Let me add these deletions to reach ~105:
+- 67 (685) delete entirely instead of trim: `/// 渲染一份视图：队列画"还没做完的"，归档画了结过的（行格式 `- [ ] [kind@epoch] 正文`）。` → DELETE (-1). Hmm, the row format is documented... but `render_view` body literally writes it. DELETE.
+- 90 (1049) `/// 队列里还欠着的事。**从机器状态算**（`[=]` 不算欠、早已归档）。` — keep the "从机器状态算" part. keep 1.
+- 106 (1338) keep.
+- 113 (1538) keep.
+- 117 (1615-1616) → 1 keep.
+- 119 (1630) keep.
+- 122 (1710) `/// 设计稿里这一章声明登场的角色（`登场:` 那一行）；与 YAML 的 `character` 同口径，可直接比名字。` — keep 1.
+
+OK, let me now just also reconsider: maybe I can compress the module docs further and the section banners further, and accept.
+
+Alternatively — reconsider whether the "comment line count" should count `//!` module doc. Yes it's a comment.
+
+Let me just do the work: aim for the aggressive plan and then measure. If I land at ~110, that's a 46% cut — close to half. I could then delete a few more borderline ones. Let me target ≤100 by deleting the borderline ones decisively.
+
+Let me finalize a decision table. I'll write it out and count as I go, being decisive.
+
+FINAL PLAN (original range → new content):
+
+1. L1-7 → 4 lines
+```
+//! 阶段推导与事实层：只回答"剧本现在是什么状态"。
+//!
+//! 阶段由文件系统事实推导，不落库；这里的「确认门」都只是提示词。
+//! 注入什么（手册 / 行为要求 / 思考模式）按任务类型算，不按阶段算（见 `role.rs`）。
+```
+count 4
+
+2. L21 → 1
+```
+/// 流程产物目录：点号目录不进引擎扫描与编辑器枚举。
+```
+count 1 (total 5)
+
+3. L26 → 1
+```
+/// 章节细节稿（按章分节）：正式产物，改完要对齐设计稿。
+```
+count 1 (6)
+
+4. L31-32 → 1
+```
+/// 队列的视图：由状态渲染出来。代码只在路由时读它当"上一轮状态"交给流程 Agent，不解析它。
+```
+count 1 (7)
+
+5. L35 → 1
+```
+/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。
+```
+count 1 (8)
+
+6. L38 → 1
+```
+/// 队列的机器状态（真相在这里）；上面的 markdown 只是它的视图。
+```
+count 1 (9)
+
+7. L41 → 0 (9)
+8. L44 → 0 (9)
+9. L47 → 1
+```
+/// 空目标的占位写法。
+```
+Hmm, `NO_TARGET = "（未指明）"` — the comment "空目标的占位写法" adds little. DELETE → 0 (9)
+
+10. L50 → 0 (9)
+11. L55 → 1
+```
+/// 自动骨架的标记行，`progress_block` 靠它判断配置有没有被补全。
+```
+count 1 (10)
+
+12. L58-59 → 1
+```
+/// 确保剧本包有个能加载的骨架（缺 `story_config.yaml` 补最小的一份、缺 `Chapters/` 就建）：编辑器靠它认剧本，已存在就不动。
+```
+count 1 (11)
+
+13. L94-96 → 1
+```
+// 相对技能目录（`data/game_data/skills`）的材料路径；这里只留流程总纲，角色手册路径由 `role.rs` 拥有。
+```
+count 1 (12)
+
+14. L99-101 → 1
+```
+/// 创作阶段：剧本状态的投影，只回答"走到哪一步"；不决定注入哪些手册与要不要开思考（那些按任务类型算，见 `role.rs`）。
+```
+count 1 (13)
+
+15. L104 → 1 (14)
+16. L108 → 0 (14)
+17. L111 → 0 (14)
+18. L120 → 1 (15)
+19. L127 → 1 (16)
+20. L148 → 1 (17)
+21. L157 → 1 (18)
+22. L162 → 0 (18)
+23. L184 → 0 (18)
+24. L192-193 → 1 (19)
+25. L219-220 → 1 (20)
+26. L223 → 1 (21)
+27. L225-226 → 1 (22)
+28. L228-230 → 1 (23)
+29. L234-235 → 1 (24)
+30. L254-255 + L343 → 1 combined (25)
+   New comment before `plan.items.len() > 1` block:
+```
+    // 队列逐项执行：标题点名第几项（换了前置时点名的是前置），免得它以为要一次把全部内容塞进一条回复。
+```
+   Wait, 343 is inside `if prerequisite {` at line 342-343. If I delete 343, the block remains. Fine.
+   count 1 (25)
+31. L269-270 → 1 (26)
+32. L292-293 → 0 (26)
+33. L301-302 → 1 (27)
+34. L311 → 1 (28)
+35. L316 → 1 (29)
+36. L324-326 → 1 (30)
+37. L335 → 1 (31)
+38. L401 → 1 (32)
+39. L412-421 → 5 (37)
+40. L423 → 1 (38)
+41. L429-430 → 1 (39)
+42. L432 → 1 (40)
+43. L436 → 1 (41)
+44. L448 → 0 (41)
+45. L450 → 1 (42)
+46. L452 → 1 (43)
+47. L454-455 → 1 (44)
+48. L459-466 → 3 (47)
+49. L474-475 → 1 (48)
+50. L498 → 1 (49)
+51. L513 → 1 (50)
+52. L524-525 → 1 (51)
+53. L540-541 → 1 (52)
+54. L549-550 → 1 (53)
+55. L567 → 1 (54)
+56. L580 → 0 (54)
+57. L589-592 → 3 (57)
+58. L607 → 0 (57)
+59. L611 → 0 (57)
+60. L628 → 0 (57)
+61. L636 → 1 (58)
+62. L647-650 → 2 (60)
+63. L658 → 1 (61)
+64. L667 → 0 (61)
+65. L677 → 0 (61)
+66. L685 → 0 (61)
+67. L705 → 1 (62)
+68. L713 → 0 (62)
+69. L720 → 1 (63)
+70. L725-728 → 2 (65)
+71. L734-735 → 1 (66)
+72. L752 → 1 (67)
+73. L759-760 → 1 (68)
+74. L772 → 1 (69)
+75. L779 → 1 (70)
+76. L796-799 → 1 (71)
+77. L808-809 → 1 (72)
+78. L822-823 → 1 (73)
+79. L825 → 1 (74)
+80. L844 → 1 (75)
+81. L864 → 0 (75)
+82. L881 → 1 (76)
+83. L910-911 → 1 (77)
+84. L924 → 1 (78)
+85. L948 → 1 (79)
+86. L979 → 1 (80)
+87. L1015-1016 → 1 (81)
+88. L1030 → 0 (81)
+89. L1049 → 1 (82)
+90. L1061 → 1 (83)
+91. L1064-1065 → 1 (84)
+92. L1116 → 1 (85)
+93. L1141 → 1 (86)
+94. L1181-1184 → 2 (88)
+95. L1186 → 1 (89)
+96. L1189-1190 → 1 (90)
+97. L1197 → 0 (90)
+98. L1200-1201 → 1 (91)
+99. L1221 → 1 (92)
+100. L1244 → 1 (93)
+101. L1281-1282 → 1 (94)
+102. L1292 → 0 (94)
+103. L1298 → 1 (95)
+104. L1332 → 1 (96)
+105. L1338 → 1 (97)
+106. L1392 → 1 (98)
+107. L1406-1407 → 1 (99)
+108. L1434 → 1 (100)
+109. L1443 → 1 (101)
+110. L1470 → 1 (102)
+111. L1516-1521 → 3 (105)
+112. L1538 → 1 (106)
+113. L1554 → 1 (107)
+114. L1559-1560 → 1 (108)
+115. L1579 → 1 (109)
+116. L1615-1616 → 1 (110)
+117. L1626 → 1 (111)
+118. L1630 → 1 (112)
+119. L1659 → 1 (113)
+120. L1685 → 1 (114)
+121. L1710 → 1 (115)
+122. L1728 → 0 (115)
+123. L1746 → 1 (116)
+124. L1777 → 1 (117)
+125. L1828 → 1 (118)
+
+118. Hmm. Still 118 = 42% reduction.
+
+I need ~16 more. Let me find them decisively. The remaining kept comments that are weakest:
+
+- 20 (L148) `// 包还不存在 → 创建流程` → DELETE (16 more needed)
+- 21 (L157) `// 设计稿读一次：`plan` 与「现有设计稿」都从这一份文本里出（读不到就是 `None`，与空文件不同）` → keep (only-read-once + None vs empty). Actually the "读不到就是 None，与空文件不同" is a real constraint. Keep.
+- 26 (L223) `/// 队列里被跳过的项（做不了），让模型在回执里说明。` → field doc on pub struct; it explains the field's purpose. Hmm, DELETE.
+- 40 (L423) `/// 账本里的一项，只在本轮有效。JSON 里就是这四个字段。` → DELETE (struct QueueEntry is clear from its fields).
+- 45 (L450) `/// `- [x]` 这一轮真的做出来了（物证在登记之后被改写过）。` → the parenthetical matters. Keep... Hmm. Actually Mark::Done with "物证在登记之后被改写过" — important. Keep.
+- 57 (L589-592) → 3. Could go to 2. Let's compress: 
+```
+/// 一份产出物算不算"这一轮做出来的"：产出型（转成 YAML）看 `Chapters/<id>.yaml` 在不在、登记之后改过没有；
+/// 修改型（改 YAML / 素材盘点）只有改过才算；稿子型（编写剧本 / 改剧本）看该章在 `design.md` 或
+/// `chapter-details.md` 里且登记之后被改过。
+```
+→ 2 lines. (-1) → 117
+- 62 (L647-650) → 2, keep.
+- 70 (L725-728) → 2, keep.
+- 74 (L772) `// 「文件在」与「读得出章节」是两件事：前者决定能不能改它，后者只是格式提醒，别当前置用。` → keep (constraint).
+- 75 (L779) `// 落盘的前置：编剧有没有把点名的这一章写成剧情细节稿（见 role::reconcile）。` → keep.
+- 79 (L825) `/// 一个区间最多展开这么多章，防止 `01-9999` 这种写法把内存撑爆。` → DELETE? MAX_SPAN = 200 with the guard code. The comment explains why the cap exists. Keep 1... DELETE (-1) → 116
+- 85 (L948) `// 换模式的影响面：已落盘的章节不会跟着重写，所以先把要改的地方摊开` → DELETE? The code checks written non-empty then pushes asset_impact_line. DELETE (-1) → 115
+- 86 (L979) `/// 已落盘的素材缺口在当前模式下意味着什么：换了模式已写好的章节不会自动重写，得把影响面摊开。` → this is for asset_impact_line. Keep 1 (it's the constraint). Hmm, or delete since 948... no, I deleted 948. Keep 979.
+- 90 (L1061) `// 本轮各项先全登记为 Open、做完一项才打勾，所以这一项往往就是"正在做的这项"，别叫"下一项"` → keep.
+- 91 (L1064-1065) → 1, keep (queue.md not editable).
+- 100 (L1221) `// 工具参数也要算：整章 YAML 就在 arguments 里` → DELETE (-1) → 114
+- 102 (L1292) already 0.
+- 109 (L1443) `// 只有一句 user 话、背后没有任何动作的"回合"没有可压的东西，压缩纯属噪音。` → DELETE? The code: `if let Some(digest) = turn_digest(...) else { continue }`. turn_digest returns None when no tools and no tail. The comment explains. Keep 1. Hmm, DELETE (-1) → 113
+- 110 (L1470) `/// 一轮的摘要：用过哪些工具（带路径）+ 最后的结论开头；无动作无结论的回合返回 `None`。` → DELETE? It documents the return semantics. Keep 1.
+- 113 (L1538) `// key 层级不固定：按已知剧本包列表最长匹配（同长度取 `known` 里靠前的那个）` → keep.
+- 116 (L1626) `/// 认出「刚写的是本会话这个剧本的哪一章」；认不出就不产生自检（数据目录也留到确认之后再取）。` → keep.
+- 118 (L1630) `// 只认本会话绑定剧本自己的章节：路径可能是相对或绝对，所以用包含判断；大小写无关（Windows）。` → keep (constraint).
+- 119 (L1659) `// 零素材：不该引用任何素材，所以不必逐条报"找不到"——有引用本身就是错` → keep.
+- 120 (L1685) keep.
+- 121 (L1710) keep.
+- 123 (L1746) `/// 把本章的素材缺口并进 `.agent/assets.md`；由**代码**维护，同名素材只登记一次。` → keep, trim bold.
+- 124 (L1777) `/// 已落盘章节引用的磁盘上没有的素材；与当前模式无关 —— 回答"换个模式会多出/少掉哪些要改的地方"。` → keep.
+- 125 (L1828) `// 引擎优先 next，其次 next_chapter；end_type 缺省即 linear` → keep (domain knowledge).
+- 3 (L26), 5 (L35), 9... 
+- 42 (L432) `/// 登记时刻（Unix 纳秒）：存满精度，"是不是本轮的"就是一次相等比较。` → could merge into 41... or DELETE (-1) → 112. Hmm, it's a field doc. DELETE.
+- 47 (L454-455) → 1 keep.
+- 50 (L498) `// 同 `(kind, target)` 只登记一次：一轮里每做完一项都要重写一次账。` → keep.
+- 52 (L524-525) → 1 keep.
+- 53 (L540-541) → 1 keep.
+- 54 (L549-550) → 1 keep.
+- 58 (L611) already 0.
+- 60 (L636) keep.
+- 63 (L658) keep.
+- 67 (L705) keep.
+- 69 (L720) keep.
+- 71 (L734-735) keep.
+- 72 (L752) keep.
+- 73 (L759-760) keep.
+- 76 (L796-799) keep.
+- 77 (L808-809) keep.
+- 78 (L822-823) keep.
+- 82 (L881) keep.
+- 83 (L910-911) keep.
+- 84 (L924) keep.
+- 87 (L1015-1016) keep.
+- 89 (L1049) keep.
+- 92 (L1116) keep.
+- 93 (L1141) keep.
+- 95 (L1186) keep.
+- 96 (L1189-1190) keep.
+- 98 (L1200-1201) keep.
+- 101 (L1281-1282) keep.
+- 103 (L1298) keep.
+- 104 (L1332) keep.
+- 105 (L1338) keep.
+- 106 (L1392) keep.
+- 107 (L1406-1407) keep.
+- 108 (L1434) keep.
+- 112 (L1579) keep.
+- 115 (L1615-1616) keep.
+- 122 (L1746) keep.
+
+Current deletions added: L148, L223, L423, L825, L948, L1221, L1443, L432, and 589-592 → 2. That's -9 → 118-9 = 109.
+
+Need 7-9 more. Ugh.
+
+Hmm, let me reconsider. Maybe I'm over-thinking. Let me reconsider a few multi-line keeps that can be compressed further:
+
+- 39 (L412-421) → could be 4 lines instead of 5. (-1) → 108
+- 49 (L459-466) → 3; could be 2? It's a doc comment on a pub fn with registration rules. Let's do 2 lines + keep. Actually:
+```
+/// 把本轮的账落盘：读回状态 → 上一轮的项出队留痕 → 登记本轮的项 → 按磁盘事实打勾 → 做完的搬进归档；
+/// 状态先写、视图后写。只登记代码能核对的产物型任务（有目标就登记），登记时刻取本轮起点。
+```
+2 lines. (-1) → 107
+- 112 (L1516-1521) → 3, could be 2:
+```
+/// 从剧本包内任意写入路径反推 key，会话绑定 / 归属反推 / 外来包拦截三个调用点共用这一个入口。
+/// 先按三类锚点认包根（`.agent/`、`Chapters/`、`story_config.yaml` 之前那段路径），不要求包已被枚举到；
+/// 锚点都不沾的再按已知剧本包列表最长匹配。
+```
+Hmm need the "why" (新建剧本中间态认不出→不绑 key→自检失效). Let me do 3 lines. Keep.
+- 1 (module doc) → 3 lines instead of 4? 
+```
+//! 阶段推导与事实层：只回答"剧本现在是什么状态"；阶段由文件系统事实推导，不落库，确认门都只是提示词。
+//! 注入什么（手册 / 行为要求 / 思考模式）按任务类型算，不按阶段算（见 `role.rs`）。
+```
+2 lines. (-2) → 105
+
+- 62 (L647-650) → 2. Fine.
+- 70 (L725-728) → 2. Fine.
+- 63? fine.
+
+- 118 (L1630) → could merge with 117 (L1626)? 1626 is fn doc, 1630 is inner comment on a different concern. Keep both? Merge would require moving. Delete 1630? It explains path containment + case-insensitivity → real constraint. Keep.
+
+- 74 (L772) `// 「文件在」与「读得出章节」是两件事：前者决定能不能改它，后者只是格式提醒，别当前置用。` Keep.
+
+Hmm, need ~5 more to reach 100. Let me pick:
+- 5 (L35) `/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。` → DELETE (-1) → 104. Hmm, "不注入提示词" is a constraint... but QUEUE_DONE_REL_PATH = ".agent/queue-done.md" and the comment on QUEUE_REL_PATH already covers view. Actually this is the归档 view; the归档 json const (L41) was deleted. I'd rather keep. 
+
+Alternative: accept ~105 and note it's a 49% cut. Hmm, "争取砍掉一半以上" — 49% is basically half.
+
+Let me push a bit more with genuinely redundant ones:
+- 4 (L31-32) → 1: "队列的视图：由状态渲染出来。代码只在路由时读它当"上一轮状态"交给流程 Agent，不解析它。" Could delete entirely since QUEUE_JSON_REL_PATH's comment (L38) says "上面的 markdown 只是它的视图". Hmm, but "代码只在路由时读它当上一轮状态，不解析它" is a constraint. Keep.
+- 6 (L38) → 1. keep.
+- 16 (L120) `/// 设计稿全文（`None` = 读不到）。事实层只读一次盘：这里读过之后不再各自重读。` → keep.
+- 17 (L127) `/// 下一个待写章节 id（仅 [`Stage::Forge`] 有意义）。` → DELETE (-1) → 104
+- 25 (L219-220) → 1 keep.
+- 33 (L301-302) → 1 keep.
+- 34 (L311) `// 用户这一轮的原话：任务名是从这句话判出来的，一句话里顺手捎带的别的事会漏掉。` → DELETE? It explains why the user_msg block is injected. Hmm, keep. Actually I could delete: the string below is 【用户这一轮的原话】. The why (task name derived from it) is the reason. Keep 1.
+
+- 37 (L335) `// 队列是这一轮的工作清单：只给一行"还剩几项"不够 —— 模型会做完手上这件就收尾。` → keep.
+- 51 (L513) `// 本轮的项按磁盘事实定状态：有结论的进归档，还欠着的留在队列里。` → DELETE? The code partition on Evidence::Open is clear. DELETE (-1) → 103
+- 68 (L713) already 0.
+- 97 (L1197) already 0.
+- 111 (L1470) `/// 一轮的摘要：用过哪些工具（带路径）+ 最后的结论开头；无动作无结论的回合返回 `None`。` → DELETE (-1) → 102
+- 114 (L1554) `/// 本会话这个剧本生效的素材模式。解析只此一处（`utils::script_modes`），**整剧校验与章节自检共用**。` → keep (single source constraint).
+- 124 (L1777) keep.
+
+102. Two more:
+- 15 (L104) `/// 没绑定剧本（[`derive`] 的默认值）；绑了 key 但包或可解析的计划还没有时是 [`Stage::Setup`]。` → merge with 108/111 deletions... keep.
+- 55 (L567) `/// 这一项的物证现在是什么状态：打勾只给这一轮真的做出来的，`Existing` 不算做完也不算欠。` → DELETE? Evidence enum with variants Done/Existing/Open; the constraint "Existing 不算做完也不算欠" is captured in Mark::Existing doc (L452) and archive doc. DELETE (-1) → 101
+- 59 (L611) already deleted.
+- 65 (L677) deleted.
+- 66 (L685) deleted.
+- 79 (L825) deleted.
+
+101. One more: 
+- 24 (L192-193) → 1: `/// 逐份读入手册并追加，冠以「角色指令」来源头；读不到必须让模型看见（只打日志它会凭记忆补规范）。` keep.
+- 41 (L429-430) → 1 keep.
+- 43 (L436) `/// `TaskKind` 归 `role.rs` 所有（不在那儿派生 serde），JSON 里只存它的 key。` → DELETE (-1) → 100. Hmm, it explains why the custom serde. It's a why-comment. But the code shows kind_key/parse_kind. I'll keep it honestly... 
+
+Ugh, I'm micro-optimizing. 100 vs 105 doesn't matter much. Let me settle at ~100-105 and be done. The key is quality: everything ≤1 line except the few structural ones, no markdown, no retrospectives.
+
+Actually, let me reconsider one thing: the instruction says the count is "本分支新增的注释行". Since the entire file is new, this is 205. Going to ~100 is a 51% cut. 
+
+Let me just execute and count at the end. I'll do the edits with distinct old_strings.
+
+One important detail: For multi-line comments I'm replacing, I must ensure old_string matches exactly including leading whitespace. The read output shows content after "N: ". Let me be careful with indentation.
+
+Let me start editing. I'll batch edits — but edits must be sequential in the same file (each edit changes content). Multiple edit calls in one message on the same file... risky? They're applied in order presumably. But safer to do them one at a time? That's ~120 tool calls — too many. Let me do them in batches of parallel calls? Same-file edits in parallel could conflict. Hmm.
+
+Actually, since each edit's old_string is unique and non-overlapping, sequential application within a single message should work. The harness likely applies them in order. Let me try with a few in one message and verify.
+
+Let me be careful about `**` removal in comments (remove markdown bold). And keep backticks.
+
+Let me write out all the edits now.
+
+Edit 1: module doc lines 1-7.
+old:
+```
+//! 阶段推导与事实层。
+//!
+//! 阶段由文件系统事实推导，不落库、不强制流程；真正阻塞的确认只有工具入口的命令审批，
+//! 这里的「确认门」全部只是提示词。
+//! **注入什么（手册 / 行为要求 / 思考模式）一律按任务类型算，不按阶段算** —— 同一阶段里
+//! 「只提问的那一轮」与「把剧情转成 YAML 的那一轮」需要的完全不是一回事（见 `role.rs`）。
+//! 这个模块只回答"剧本现在是什么状态"。
+```
+new:
+```
+//! 阶段推导与事实层：只回答"剧本现在是什么状态"；阶段由文件系统事实推导，不落库，确认门都只是提示词。
+//! 注入什么（手册 / 行为要求 / 思考模式）按任务类型算，不按阶段算（见 `role.rs`）。
+```
+
+Edit 2: L21
+old: `/// 流程产物目录。点号目录不进引擎扫描与编辑器枚举；「详情」浮窗直接列这一层。`
+new: `/// 流程产物目录：点号目录不进引擎扫描与编辑器枚举。`
+
+Edit 3: L26
+old: `/// 章节细节稿（按章分节）：模型曾自己发明它写细节而系统不知情，现在是正式产物，改完要对齐设计稿。`
+new: `/// 章节细节稿（按章分节）：正式产物，改完要对齐设计稿。`
+
+Edit 4: L31-32
+old:
+```
+/// 队列的**视图**：由状态渲染出来（用户看的是这一份）。代码只在路由时读它当"上一轮状态"交给流程
+/// Agent，不解析它。
+```
+new:
+```
+/// 队列的视图：由状态渲染出来。代码只在路由时读它当"上一轮状态"交给流程 Agent，不解析它。
+```
+
+Edit 5: L35
+old: `/// 打完勾的队列项搬到这里。只给人回看历史，**不注入提示词** —— 旧账不该影响当前判断。`
+new: `/// 打完勾的队列项搬到这里，只给人回看，不注入提示词。`
+
+Edit 6: L38
+old: `/// 队列的**机器状态**（真相在这里）：serde 序列化的 `Vec<QueueEntry>`。上面那份 markdown 只是它的视图。`
+new: `/// 队列的机器状态（真相在这里）：serde 序列化的 `Vec<QueueEntry>`；上面的 markdown 只是它的视图。`
+
+Edit 7: delete L41 + L44 (they're not adjacent — 41, 42 const, 43 blank, 44, 45 const). Let me handle individually.
+L41 delete:
+```
+/// 归档的机器状态。与 [`QUEUE_JSON_REL_PATH`] 同构，只是装着了结过的项。
+const QUEUE_DONE_JSON_REL_PATH: &str = ".agent/queue-done.json";
+```
+→
+```
+const QUEUE_DONE_JSON_REL_PATH: &str = ".agent/queue-done.json";
+```
+Wait — deleting the doc line leaves the const. But is there a blank line issue? No.
+
+Hmm, but should I delete doc comments on non-pub consts? They're `const` (private). Fine.
+
+Edit 8: L44 delete:
+```
+/// 归档保留条数上限：这是给人回看的流水，不该无限长。
+const QUEUE_DONE_KEEP: usize = 50;
+```
+→ `const QUEUE_DONE_KEEP: usize = 50;`
+
+Edit 9: L47 delete:
+```
+/// 空目标的占位写法：状态里"没点名目标"就是空串，视图与注入给模型的进度行都塌成它。
+const NO_TARGET: &str = "（未指明）";
+```
+→ `const NO_TARGET: &str = "（未指明）";`
+
+Hmm wait, deleting this removes the explanation that empty target collapses to it. It's minor. OK.
+
+Edit 10: L50 delete:
+```
+/// 视图里的登记时刻只到秒（`[write_chapter@1790664196]`）；状态里存的是完整时刻（纳秒）。
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+```
+→ `const NANOS_PER_SEC: u64 = 1_000_000_000;`
+
+Edit 11: L55
+old: `/// 自动骨架的标记行。`progress_block` 靠它判断"这份配置还没被补全"。`
+new: `/// 自动骨架的标记行，`progress_block` 靠它判断配置有没有被补全。`
+
+Edit 12: L58-59 → 1.
+
+Edit 13: L94-96 → 1.
+
+Edit 14: L99-101 → 1.
+
+Edit: L108 delete:
+```
+    Setup,
+    /// 设计稿已声明章节，但尚未写完。
+    Forge,
+```
+→
+```
+    Setup,
+    Forge,
+```
+L111 delete:
+```
+    Polish,
+    /// 有剧本包、无设计稿、且已有章节：修改既有剧本。
+    Modify,
+```
+→
+```
+    Polish,
+    Modify,
+```
+Hmm, wait. Stage::Modify without doc — is it obvious? "Modify" + module doc. Eh. Actually, hold on. Let me reconsider: these doc comments on enum variants are cheap and useful. Deleting them costs clarity. But the task demands brevity. I'll delete 108 (Forge, obvious: forging = writing chapters) and keep 111? Hmm, "Modify" is also obvious. Let me delete both for count.
+
+Hmm, actually let me reconsider: the reviewer's goal is removing verbose retrospective narration, not stripping all docs. Being too aggressive on short useful docs might be worse. But rule 4 explicitly: "代码本身已经说清楚的注释整条删掉". `Forge` / `Modify` variant names + the enum's own doc → clear enough. OK delete.
+
+Edit: L127 delete:
+```
+    /// 下一个待写章节 id（仅 [`Stage::Forge`] 有意义）。
+    pub fn next_chapter(&self) -> Option<&str> {
+```
+→
+```
+    pub fn next_chapter(&self) -> Option<&str> {
+```
+Hmm, but next_chapter is pub. Losing doc. It's fine.
+
+Actually hmm — wait. Careful: this creates `impl StageSnapshot {` then blank? Let me check lines 126-128:
+```
+126: impl StageSnapshot {
+127:     /// 下一个待写章节 id（仅 [`Stage::Forge`] 有意义）。
+128:     pub fn next_chapter(&self) -> Option<&str> {
+```
+Deleting 127 is fine.
+
+Edit: L148 delete:
+```
+        // 包还不存在 → 创建流程
+        return StageSnapshot {
+```
+→
+```
+        return StageSnapshot {
+```
+Hmm, but then `let Ok(script_dir) = ... else {` with no explanation of why Setup. Keep? I said delete. Hmm... Actually I'll keep this one; it's 1 short line and explains the fallback. Let me keep it and instead delete something else. Ugh.
+
+OK. Decision: I'll keep L148. 
+
+Edit: L157 keep (trim bold).
+old: `    // 设计稿读一次：`plan` 与「现有设计稿」都从这一份文本里出（读不到就是 `None`，与空文件不同）`
+new: `    // 设计稿读一次：`plan` 与「现有设计稿」都出自这份文本（读不到是 `None`，与空文件不同）`
+
+Edit: L162 delete:
+```
+        // 无设计稿：已有章节说明是既存剧本，否则还在设计与大纲阶段
+        if written.is_empty() {
+```
+→
+```
+        if written.is_empty() {
+```
+
+Edit: L184 delete:
+```
+/// 追加一段行为要求（前导空行 + 全文）；空的不注入。
+fn push_directive(out: &mut String, directive: &str) {
+```
+→ `fn push_directive(out: &mut String, directive: &str) {`
+
+Edit: L192-193 → 1.
+
+Edit: L219-220 → 1.
+
+Edit: L223 delete:
+```
+    /// 队列里被跳过的项（做不了），让模型在回执里说明。
+    pub skipped: &'a [String],
+```
+→ `    pub skipped: &'a [String],`
+
+Edit: L225-226 → 1.
+
+Edit: L228-230 → 1.
+
+Edit: L234-235 → 1.
+
+Edit: L254-255 → 1.
+
+Edit: L269-270 → 1.
+
+Edit: L292-293 delete:
+```
+    // 「一轮多项」的汇报口径：各项互相代劳过（用户只说删第四章的 YAML，第 1 项却把第五章的剧情
+    // 也写了），同一段内容也被复述过三遍。
+    if plan.items.len() > 1 {
+```
+→ `    if plan.items.len() > 1 {`
+
+Edit: L301-302 → 1.
+
+Edit: L311 keep (trim).
+Edit: L316 keep (trim).
+Edit: L324-326 → 1.
+Edit: L335 keep (trim).
+Edit: L343 delete:
+```
+        if prerequisite {
+            // 「换了前置」那一格：本轮真正要做的是前置，队列里那一行是补完前置后同轮接着做的原任务
+            out.push_str(&format!(
+```
+→
+```
+        if prerequisite {
+            out.push_str(&format!(
+```
+
+Edit: L401 keep.
+Edit: L412-421 → 5 (→4). Let me do 4:
+```
+// ---------- 队列账本 ----------
+//
+// 这份账只回答"这一轮用户让做的事做完没有"。真相在 `.agent/queue.json`，`queue.md` / `queue-done.md`
+// 只是它的视图、不支持手改；只登记代码能核对的项；队列不跨轮继承，打完勾的项搬进归档。
+```
+4 lines. (-6)
+
+Edit: L423 delete → 
+```
+/// 账本里的一项，只在本轮有效。JSON 里就是这四个字段。
+```
+Hmm, I said delete. Let me delete:
+```
+/// 账本里的一项。**只在本轮有效**（见模块内注释第 3 条）。JSON 里就是这四个字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+```
+→
+```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+```
+Hmm, wait, there's a risk: the section banner references... no. OK delete.
+
+Hmm, actually hold on. If I delete the doc comment of struct QueueEntry, then `/// 目标...` docs on fields remain. That's fine.
+
+Edit: L429-430 → 1.
+Edit: L432 delete:
+```
+    /// 登记时刻（Unix 纳秒）。存满精度，于是"这一项是不是本轮的"就是一次相等比较。
+    registered_at: u64,
+```
+→ `    registered_at: u64,`
+
+Edit: L436 keep (trim).
+
+Edit: L448 delete:
+```
+    /// `- [ ]` 这一轮排的，还没做完。
+    Open,
+```
+→ `    Open,`
+
+Edit: L450 trim, L452 trim, L454-455 → 1.
+
+Edit: L459-466 → 2.
+Edit: L474-475 → 1.
+Edit: L498 keep.
+Edit: L513 delete:
+```
+    // 本轮的项按磁盘事实定状态：有结论的进归档（`[x]` 这一轮做出来的 / `[=]` 本来就在盘上的），还欠着的留在队列里。
+    let (settled, open): (Vec<_>, Vec<_>) = kept
+```
+→ `    let (settled, open): (Vec<_>, Vec<_>) = kept`
+Hmm, but this explains the partition. It's arguably useful: "有结论的进归档，还欠着的留在队列里". I'll keep it trimmed instead: `// 本轮的项按磁盘事实定状态：有结论的进归档，还欠着的留在队列里。` — keep 1. I'll keep 1 (drop the example parenthetical), it's a real summary. Then -0. Ugh, count.
+
+OK you know what, let me stop the micro-optimization and just execute; I'll measure at the end and if it's above ~110 I'll trim a few more short ones.
+
+Let me do the edits now in batches. I'll be careful with exact strings.
+
+Actually — a concern about parallel edits to the same file in one message. The instructions say make independent calls in the same block. Edits to the same file are not truly independent, but since old_strings are unique and disjoint, order doesn't matter. I'll batch ~8 per message to limit risk.
+
+Let me go.
+
+Note: I must include leading whitespace exactly. From the read output, after "N: " the content begins. For `///` at top level, no leading space. For nested ones, 4 spaces.
+
+Let's start with batch 1 (module doc + top consts).

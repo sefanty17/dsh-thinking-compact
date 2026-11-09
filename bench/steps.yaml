@@ -1,0 +1,499 @@
+# 30-round task script: a minimal block game (block registry + worldgen + basic interaction + save/load)
+# Target stack: Python 3.10+, standard library only. Run all commands from the project root
+# that contains the `game/` package. Every acceptance command must exit 0 to count as passed.
+
+- round: 1
+  title: 项目骨架与方块注册表
+  goal: 建立 Python 包骨架，并实现一个可按名字注册、查询方块的内存注册表。
+  spec: |
+    全部代码用 Python 3.10+，只允许标准库。创建 game/__init__.py 与 game/blocks.py。
+    在 blocks.py 中定义 @dataclass Block，至少含字段 name: str。
+    模块级 BLOCKS: dict[str, Block] 保存所有已注册方块。
+    register_block(name: str, **props) -> Block：校验名字后创建对象、写入 BLOCKS、返回对象。
+    get_block(name: str) -> Block：按名查找，不存在时抛 KeyError。
+    名字规则：1-32 个字符，只允许小写字母、数字、下划线；非法名字抛 ValueError。
+  reference: mods/ITEMS/mcl_core/nodes_base.lua; mods/ITEMS/mcl_core/init.lua
+  acceptance:
+    - 'python -c "from game.blocks import Block, BLOCKS, register_block, get_block; b=register_block(\"probe_one\"); assert isinstance(b, Block); assert get_block(\"probe_one\") is b; assert \"probe_one\" in BLOCKS"'
+    - 'python -c "from game.blocks import register_block; ok=False; exec(\"try:\\n register_block(\\\"BadName\\\")\\nexcept ValueError:\\n ok=True\"); assert ok"'
+  depends_on: []
+
+- round: 2
+  title: 方块物理与渲染属性
+  goal: 给方块补齐硬度、透明、碰撞、纹理占位四类基础属性，并定义合理默认值。
+  spec: |
+    Block 增加字段：hardness: float=1.0，transparent: bool=False，solid: bool=True，texture: str=""。
+    hardness 表示挖掘耗时基数，0 表示瞬间破坏，负数留给不可破坏方块（第 6 轮再校验）。
+    transparent=True 表示光线/视线可穿过（如玻璃、水），solid=False 表示无碰撞（如空气、水）。
+    register_block 把同名关键字参数写入对应字段，未传时使用上述默认值。
+    texture 只存占位标识或颜色名，不要求真实图片文件。
+  reference: mods/ITEMS/mcl_core/nodes_base.lua; mods/ITEMS/mcl_core/nodes_liquid.lua; mods/ITEMS/mcl_core/nodes_glass.lua
+  acceptance:
+    - 'python -c "from game.blocks import register_block; b=register_block(\"probe_glass\", hardness=0.3, transparent=True, solid=True, texture=\"glass\"); assert b.hardness==0.3 and b.transparent is True and b.solid is True and b.texture==\"glass\""'
+    - 'python -c "from game.blocks import register_block; b=register_block(\"probe_default\"); assert b.hardness==1.0 and b.transparent is False and b.solid is True and b.texture==\"\""'
+  depends_on: [1]
+
+- round: 3
+  title: 方块数字 ID 与双向索引
+  goal: 为每个方块分配唯一递增整数 ID，并支持按 ID 反查方块。
+  spec: |
+    模块级 next_id: int 从 0 开始；每次成功注册分配当前值并自增，失败不消耗 ID。
+    Block 增加字段 id: int（注册后必有值）。
+    BLOCKS_BY_ID: dict[int, Block] 与 BLOCKS 同步维护。
+    get_block_by_id(block_id: int) -> Block：不存在时抛 KeyError。
+    ID 不复用、不跳号；重复注册失败后下一次注册仍拿到连续 ID。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua（content id 缓存）; mods/ITEMS/mcl_core/nodes_base.lua
+  acceptance:
+    - 'python -c "from game.blocks import register_block, get_block_by_id, BLOCKS_BY_ID; a=register_block(\"probe_id_a\"); b=register_block(\"probe_id_b\"); assert isinstance(a.id,int) and b.id==a.id+1; assert get_block_by_id(a.id) is a; assert BLOCKS_BY_ID[b.id] is b"'
+    - 'python -c "from game.blocks import register_block, BLOCKS; register_block(\"probe_id_c\"); ids=[x.id for x in BLOCKS.values()]; assert len(ids)==len(set(ids))"'
+  depends_on: [1]
+
+- round: 4
+  title: 内置方块集与纹理占位色
+  goal: 注册一组够用的基础方块，并给每个方块一个确定性的占位颜色。
+  spec: |
+    新建 game/builtins.py，提供幂等函数 register_builtin_blocks()：若 BLOCKS 已有 "air" 则直接返回。
+    至少注册：air(id=0), stone, dirt, grass, sand, water, wood, leaves, coal_ore, iron_ore。
+    属性约定：air solid=False transparent=True；water solid=False transparent=True；其余默认 solid=True。
+    air 的 hardness=0；coal_ore/iron_ore 的 hardness 高于 stone。
+    在 blocks.py 增加 block_color(name) -> tuple[int,int,int]，返回 0-255 的 RGB；未知方块返回 (128,128,128)。
+    同一名字多次调用结果必须一致；颜色可来自固定表或名字哈希。
+  reference: mods/ITEMS/mcl_core/nodes_base.lua; mods/ITEMS/mcl_core/nodes_liquid.lua; mods/ITEMS/mcl_core/nodes_trees.lua
+  acceptance:
+    - 'python -c "from game.builtins import register_builtin_blocks; from game.blocks import BLOCKS; register_builtin_blocks(); need={\"air\",\"stone\",\"dirt\",\"grass\",\"sand\",\"water\",\"wood\",\"leaves\",\"coal_ore\",\"iron_ore\"}; assert need<=set(BLOCKS); assert BLOCKS[\"air\"].id==0; assert BLOCKS[\"water\"].solid is False"'
+    - 'python -c "from game.builtins import register_builtin_blocks; from game.blocks import block_color; register_builtin_blocks(); c=block_color(\"stone\"); assert len(c)==3 and all(0<=v<=255 for v in c); assert block_color(\"stone\")==block_color(\"stone\"); assert block_color(\"no_such\")==(128,128,128)"'
+    - 'python -c "from game.builtins import register_builtin_blocks; register_builtin_blocks(); register_builtin_blocks(); print(\"OK\")"'
+  depends_on: [1, 2, 3]
+
+- round: 5
+  title: 方块标签与集合查询
+  goal: 用标签把方块分组，支持按标签批量检索。
+  spec: |
+    Block 增加字段 tags: set[str]，默认空集合。
+    register_block 接受 tags 参数，允许 list/tuple/set，内部统一转成 set[str]。
+    为内置方块打标签：stone/dirt/grass/sand/coal_ore/iron_ore -> "stone_like"；
+    coal_ore/iron_ore -> "ore"；wood/leaves -> "wood"；water -> "liquid"。
+    blocks_by_tag(tag: str) -> list[str]：返回按名字排序的列表；无匹配返回 []。
+  reference: mods/ITEMS/mcl_core/nodes_base.lua（groups 字段）; mods/CORE/mcl_autogroup/init.lua
+  acceptance:
+    - 'python -c "from game.builtins import register_builtin_blocks; from game.blocks import blocks_by_tag; register_builtin_blocks(); assert \"coal_ore\" in blocks_by_tag(\"ore\"); assert \"stone\" in blocks_by_tag(\"stone_like\"); assert \"wood\" in blocks_by_tag(\"wood\"); assert blocks_by_tag(\"missing_tag\")==[]"'
+    - 'python -c "from game.builtins import register_builtin_blocks; from game.blocks import blocks_by_tag; register_builtin_blocks(); a=blocks_by_tag(\"stone_like\"); assert a==sorted(a)"'
+  depends_on: [4]
+
+- round: 6
+  title: 注册校验与错误处理
+  goal: 把非法注册挡在注册表之外，保证 BLOCKS 始终一致。
+  spec: |
+    定义 BlockRegistrationError(ValueError)，这样第 1 轮的非法名 ValueError 断言仍然成立。
+    validate_block(name: str, props: dict) -> list[str]：返回错误信息列表，空列表表示合法。
+    校验项：名字规则；hardness 必须是 >=0 的数字；id 若提供必须是 >=0 的 int；
+    texture 必须是 str；tags 必须是字符串集合；transparent/solid 必须是 bool。
+    register_block 先调用 validate_block，失败抛 BlockRegistrationError；
+    重复注册同名方块也抛 BlockRegistrationError，且不得修改已有对象、不得消耗 next_id。
+  reference: mods/ITEMS/mcl_core/init.lua; mods/CORE/mcl_autogroup/init.lua
+  acceptance:
+    - 'python -c "from game.blocks import validate_block; assert validate_block(\"ok_block\", {\"hardness\":1.0})==[]; assert validate_block(\"bad block!\", {})!=[]; assert validate_block(\"bad_h\", {\"hardness\":-1})!=[]; assert validate_block(\"BadName\", {})!=[]"'
+    - |
+      python - <<PY
+      from game.blocks import register_block, BlockRegistrationError
+      register_block("probe_dup")
+      try:
+          register_block("probe_dup")
+      except BlockRegistrationError:
+          print("OK")
+      else:
+          raise SystemExit(1)
+      PY
+  depends_on: [4]
+
+- round: 7
+  title: 区块数据结构
+  goal: 实现 16x16x64 的稠密区块容器，掌握线性索引与边界检查。
+  spec: |
+    新建 game/chunk.py，定义 CHUNK_SIZE=16、WORLD_HEIGHT=64。
+    class Chunk：字段 cx:int、cz:int、voxels:list[str]，长度必须是 16*16*64，初始全为 "air"。
+    index(x,y,z) 把局部坐标映射到 voxels 下标，公式必须单射；get/set 均使用它。
+    get(x,y,z)->str 与 set(x,y,z,name) 要求 0<=x,z<16 且 0<=y<64，越界抛 IndexError。
+    get 不存在的方块返回 "air"；set 不校验方块是否已注册（注册校验在更高层做）。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua（VoxelManip/内容 ID）; mods/MAPGEN/mcl_mapgen_core/api.lua
+  acceptance:
+    - 'python -c "from game.chunk import Chunk, CHUNK_SIZE, WORLD_HEIGHT; c=Chunk(0,0); assert CHUNK_SIZE==16 and WORLD_HEIGHT==64; assert c.get(0,0,0)==\"air\"; c.set(15,63,15,\"stone\"); assert c.get(15,63,15)==\"stone\"; assert c.get(0,0,1)==\"air\""'
+    - |
+      python - <<PY
+      from game.chunk import Chunk
+      c = Chunk(0, 0)
+      for args in [(16, 0, 0), (0, 64, 0), (0, -1, 0), (-1, 0, 0)]:
+          try:
+              c.get(*args)
+          except IndexError:
+              continue
+          raise SystemExit("expected IndexError for %r" % (args,))
+      print("OK")
+      PY
+  depends_on: [1]
+
+- round: 8
+  title: 世界容器与坐标映射
+  goal: 用世界坐标读写方块，自动处理区块划分与负坐标。
+  spec: |
+    新建 game/world.py，class World(seed:int=0, autogenerate:bool=False)。
+    构造时调用 builtins.register_builtin_blocks()（必须幂等），保证任何 World 都有内置方块可用。
+    字段：seed、chunks: dict[tuple[int,int], Chunk]、generated: set、dirty: dict。
+    坐标换算：cx = x // 16，cz = z // 16，lx = x % 16，lz = z % 16（Python 地板除，负数也正确）。
+    get_block(x,y,z)->str 与 set_block(x,y,z,name)：y 必须在 [0,64)，否则 IndexError。
+    访问未存在区块时创建空区块（全 air）；set_block 写 world.dirty[(x,y,z)]；get_block 不改 dirty。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua; mods/CORE/mcl_worlds/init.lua
+  acceptance:
+    - 'python -c "from game.world import World; w=World(seed=1); w.set_block(3,5,7,\"stone\"); assert w.get_block(3,5,7)==\"stone\"; assert w.get_block(4,5,7)==\"air\"; assert w.get_block(3,5,7)==\"stone\""'
+    - 'python -c "from game.world import World; w=World(seed=1); w.set_block(-1,5,-17,\"dirt\"); assert w.get_block(-1,5,-17)==\"dirt\"; assert (-1,-2) in w.chunks"'
+  depends_on: [7, 4]
+
+- round: 9
+  title: 确定性哈希噪声
+  goal: 实现不依赖随机状态的 2D/3D 值噪声，为地形和矿脉提供可复现随机源。
+  spec: |
+    新建 game/noise.py。先实现 hash2i(seed,x,y)->int 与 hash3i(seed,x,y,z)->int，返回稳定的 32 位无符号整数。
+    哈希必须基于整数位运算，禁止使用 Python 内置 hash()（其跨进程不稳定）。
+    value_noise_2d(seed,x,y)->float：在整数格点取哈希值归一化到 [0,1]，格内做平滑插值（smoothstep）。
+    value_noise_3d(seed,x,y,z)->float：同理，三线性插值。
+    必须支持负坐标；同一进程内重复调用结果完全相同。
+  reference: mods/MAPGEN/mcl_mapgen_core/ores.lua（noise_params）; mods/MAPGEN/mcl_biomes/init.lua（heat/humidity noise）
+  acceptance:
+    - 'python -c "from game.noise import value_noise_2d; a=value_noise_2d(42,3,7); b=value_noise_2d(42,3,7); assert a==b and 0.0<=a<=1.0; assert value_noise_2d(42,-4,-9)==value_noise_2d(42,-4,-9)"'
+    - 'python -c "from game.noise import value_noise_2d; vals={value_noise_2d(s,3,7) for s in range(10)}; assert len(vals)>1"'
+    - 'python -c "from game.noise import value_noise_3d; v=value_noise_3d(42,1,2,3); assert 0.0<=v<=1.0 and v==value_noise_3d(42,1,2,3)"'
+  depends_on: []
+
+- round: 10
+  title: 分形噪声叠加
+  goal: 用多八度叠加把单层值噪声变成有起伏细节的地形噪声。
+  spec: |
+    在 game/noise.py 增加 fbm_2d(seed,x,y,octaves=4,persistence=0.5,lacunarity=2.0)->float。
+    每一层频率乘 lacunarity、振幅乘 persistence，最后把总振幅归一化到 [0,1]。
+    octaves 必须 >=1，否则抛 ValueError；octaves=1 时结果与 value_noise_2d 同量级。
+    同时提供 fbm_3d(...)->float，参数含义一致，供洞穴与矿脉使用。
+    函数必须无全局可变状态，同参数结果稳定。
+  reference: mods/MAPGEN/mcl_mapgen_core/ores.lua（octaves/persist/lacunarity）; mods/MAPGEN/mcl_biomes/init.lua
+  acceptance:
+    - 'python -c "from game.noise import fbm_2d; vals=[fbm_2d(42,i,0,octaves=4) for i in range(64)]; assert all(0.0<=v<=1.0 for v in vals); assert max(vals)-min(vals)>0.05; assert fbm_2d(42,1,2,octaves=1)==fbm_2d(42,1,2,octaves=1)"'
+    - 'python -c "from game.noise import fbm_2d; ok=False; exec(\"try:\\n fbm_2d(1,0,0,octaves=0)\\nexcept ValueError:\\n ok=True\"); assert ok"'
+  depends_on: [9]
+
+- round: 11
+  title: 地形高度图
+  goal: 用分形噪声生成可复现的地表高度，并限制在合理范围内。
+  spec: |
+    新建 game/mapgen.py，定义 SEA_LEVEL=32、MIN_HEIGHT=8、MAX_HEIGHT=56。
+    height_at(seed:int, wx:int, wz:int)->int：用 fbm_2d 生成 0..1 值，先做对比度拉伸
+    v = clamp((v-0.5)*2.0+0.5, 0, 1)，再线性映射到 [MIN_HEIGHT,MAX_HEIGHT] 后取整。
+    同一个 (seed,wx,wz) 必须始终返回同一个高度；wx/wz 支持负值。
+    相邻格高度应连续（允许一次最多变化 2 格），不得出现大量锯齿。
+    函数不依赖 World，不产生副作用。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua（地形高度）; mods/MAPGEN/mcl_biomes/init.lua
+  acceptance:
+    - 'python -c "from game.mapgen import height_at, SEA_LEVEL, MIN_HEIGHT, MAX_HEIGHT; from game.chunk import WORLD_HEIGHT; hs=[height_at(42,x,0) for x in range(64)]; assert MIN_HEIGHT<=min(hs) and max(hs)<=MAX_HEIGHT; assert len(set(hs))>1; assert 0<SEA_LEVEL<WORLD_HEIGHT"'
+    - 'python -c "from game.mapgen import height_at; hs=[height_at(42,x,0) for x in range(-32,32)]; assert max(abs(hs[i+1]-hs[i]) for i in range(len(hs)-1))<=4"'
+  depends_on: [10]
+
+- round: 12
+  title: 地层剖面生成
+  goal: 按高度图填充基岩、石头、泥土、草方块四层，形成第一版区块地形。
+  spec: |
+    generate_chunk(world, cx, cz) -> Chunk：创建/复用世界坐标 (cx,cz) 对应的 Chunk，并写入 world.chunks。
+    对每个局部列 (lx,lz)，用世界坐标 wx=cx*16+lx、wz=cz*16+lz 求 h=height_at(world.seed,wx,wz)。
+    分层：y=0 放 "bedrock"；1<=y<=h-4 放 "stone"；h-3<=y<=h-1 放 "dirt"；y=h 放 "grass"；y>h 放 "air"。
+    必须能从区块局部坐标正确换算回世界坐标，保证相邻区块地表连续。
+    生成期间不得写 world.dirty（生成不算玩家改动，第 27 轮会用到）。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua（c_stone/c_dirt/c_dirt_with_grass 填充）; mods/MAPGEN/mcl_biomes/init.lua（node_top/depth_top）
+  acceptance:
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at; w=World(42); c=generate_chunk(w,0,0); ok=[(x,z) for x in range(16) for z in range(16) if c.get(x,0,z)==\"bedrock\" and c.get(x,height_at(42,x,z),z) in (\"grass\",\"sand\") and c.get(x,height_at(42,x,z)-1,z) in (\"dirt\",\"sand\") and c.get(x,height_at(42,x,z)-4,z)==\"stone\"]; assert ok"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at; w=World(42); a=generate_chunk(w,0,0); b=generate_chunk(w,1,0); h0=height_at(42,15,0); h1=height_at(42,16,0); assert a.get(15,h0,0) in (\"grass\",\"sand\",\"dirt\",\"stone\"); assert b.get(0,h1,0) in (\"grass\",\"sand\")"'
+  depends_on: [11, 4]
+
+- round: 13
+  title: 海平面与水体填充
+  goal: 在低于海平面的洼地填水，让世界出现海洋与湖泊。
+  spec: |
+    在 generate_chunk 的地层填充之后加水体步骤。
+    若某列 h < SEA_LEVEL，则对 y in (h, SEA_LEVEL] 的格位写 "water"；h >= SEA_LEVEL 时不填。
+    水体只能覆盖原本是 air 的格位，绝不能覆盖 bedrock/stone/dirt/grass。
+    海平面处必须连续：同一列从 h+1 到 SEA_LEVEL 全是 water。
+    生成顺序固定为“地形 -> 水体”，后续轮次在此之后再插入群系/洞穴/矿石。
+  reference: mods/ITEMS/mcl_core/nodes_liquid.lua; mods/MAPGEN/mcl_mapgen_core/init.lua（c_water / water_level）
+  acceptance:
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at, SEA_LEVEL; w=World(42); cs=[(generate_chunk(w,cx,cz),cx,cz) for cx in range(-1,2) for cz in range(-1,2)]; low=[(c,lx,lz,height_at(42,cx*16+lx,cz*16+lz)) for c,cx,cz in cs for lx in range(16) for lz in range(16) if height_at(42,cx*16+lx,cz*16+lz)<SEA_LEVEL]; assert low; c,lx,lz,h=low[0]; assert c.get(lx,h+1,lz)==\"water\" and c.get(lx,SEA_LEVEL,lz)==\"water\""'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at, SEA_LEVEL; w=World(42); cs=[(generate_chunk(w,cx,cz),cx,cz) for cx in range(-1,2) for cz in range(-1,2)]; high=[(c,lx,lz,height_at(42,cx*16+lx,cz*16+lz)) for c,cx,cz in cs for lx in range(16) for lz in range(16) if height_at(42,cx*16+lx,cz*16+lz)>SEA_LEVEL]; assert high; c,lx,lz,h=high[0]; assert c.get(lx,h+1,lz)==\"air\""'
+  depends_on: [12]
+
+- round: 14
+  title: 生物群系与表层变化
+  goal: 用低频噪声划分平原/沙漠，让地表方块随群系变化。
+  spec: |
+    在 mapgen.py 增加 biome_at(seed,wx,wz)->str，只返回 "plains" 或 "desert"。
+    用低频率 fbm_2d（尺度明显大于 height_at）取值，超过阈值 0.55 判为沙漠，否则平原。
+    generate_chunk 在铺表层时读取群系：沙漠列 y=h 放 "sand"、h-3..h-1 放 "sand"；平原保持 grass/dirt。
+    群系判断必须用世界坐标，不能只用局部坐标，否则区块边界会突变。
+    水体与海平面逻辑保持不变，且水下的表层仍按群系铺设。
+  reference: mods/MAPGEN/mcl_biomes/init.lua（heat_point/humidity_point、node_top/node_filler）; mods/MAPGEN/mcl_mapgen_core/init.lua（c_sand）
+  acceptance:
+    - 'python -c "from game.mapgen import biome_at; bs={biome_at(42,x,z) for x in range(0,64) for z in range(0,64)}; assert bs <= {\"plains\",\"desert\"}; assert len(bs)>=1"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at, biome_at; w=World(42); c=generate_chunk(w,0,0); x,z=0,0; b=biome_at(42,x,z); h=height_at(42,x,z); assert c.get(x,h,z)==(\"sand\" if b==\"desert\" else \"grass\")"'
+    - 'python -c "from game.mapgen import biome_at; assert biome_at(42,-100,-100)==biome_at(42,-100,-100)"'
+  depends_on: [11, 4]
+
+- round: 15
+  title: 矿石分布
+  goal: 在石头层中按深度约束撒入煤矿与铁矿，且不破坏地层结构。
+  spec: |
+    在 mapgen.py 定义 ORE_CONFIG，至少包含 coal_ore 与 iron_ore 的 y 范围与哈希阈值。
+    coal_ore：5<=y<=40，hash3i(seed,x,y,z)%180==0 时替换 stone；iron_ore：5<=y<=24，%400==0。
+    只允许把 "stone" 替换成矿石，不能替换 bedrock/dirt/grass/water/air。
+    3D 哈希必须用世界坐标，保证同一世界可复现、相邻区块不重复。
+    矿石步骤放在洞穴之后（第 18 轮调整顺序），本轮先独立实现并被 generate_chunk 调用。
+  reference: mods/MAPGEN/mcl_mapgen_core/ores.lua（register_ore、y_min/y_max、clust_scarcity）
+  acceptance:
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); vs=set(); [vs.update(generate_chunk(w,cx,cz).voxels) for cx in range(-1,2) for cz in range(-1,2)]; assert \"coal_ore\" in vs and \"iron_ore\" in vs"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); cs=[generate_chunk(w,cx,cz) for cx in range(-1,2) for cz in range(-1,2)]; ys=[y for c in cs for x in range(16) for z in range(16) for y in range(64) if c.get(x,y,z)==\"coal_ore\"]; assert ys and min(ys)>=5 and max(ys)<=40"'
+  depends_on: [12, 9]
+
+- round: 16
+  title: 树木结构点缀
+  goal: 在平原草地上按稀疏概率生成树干与树叶，形成最基础的结构点缀。
+  spec: |
+    在 mapgen.py 增加 tree_at(seed,wx,wz)->bool：仅当群系为 plains 且 hash2i(seed,wx,wz)%64==0 时为 True。
+    place_tree(world,x,y,z)：y 是地表草方块高度；树干从 y+1 向上 4-6 格放 "wood"（高度可由 hash 决定）。
+    树冠以树干顶部为中心，半径 2 的近似球形放 "leaves"，跳过已有非 air 的格位。
+    只在 y>SEA_LEVEL 的草方块上生成；不得覆盖水、矿石或已有树干。
+    generate_chunk 在矿石之后调用；若树冠跨出当前区块，只写当前区块内的部分，不读取邻居区块。
+  reference: mods/MAPGEN/mcl_biomes/init.lua（register_decoration、schematic 树）; mods/ITEMS/mcl_core/nodes_trees.lua; mods/ITEMS/mcl_core/schematics/
+  acceptance:
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); vs=set(); [vs.update(generate_chunk(w,cx,cz).voxels) for cx in range(-2,3) for cz in range(-2,3)]; assert \"wood\" in vs and \"leaves\" in vs"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk, height_at; w=World(42); c=generate_chunk(w,0,0); woods=[(x,y,z) for x in range(16) for z in range(16) for y in range(64) if c.get(x,y,z)==\"wood\"]; assert all(y>height_at(42,x,z) for x,y,z in woods)"'
+  depends_on: [12, 14]
+
+- round: 17
+  title: 洞穴雕刻
+  goal: 用 3D 噪声在地下挖出连通空洞，同时保护地表与基岩。
+  spec: |
+    在 mapgen.py 增加 is_cave(seed,x,y,z)->bool：用 fbm_3d 取值，>0.62 判为洞穴。
+    generate_chunk 在矿脉之前、地形之后雕刻：只把 "stone" 改为 "air"。
+    约束：y 必须在 [2, h-2] 之间；不得挖掉 y=0 的 bedrock；h 是当前列地表高度。
+    洞穴不得穿透到水面以下形成开口：若 y>=h-2 一律不雕。
+    雕刻结果必须确定：同一 seed/坐标重复生成完全一致。
+  reference: mods/MAPGEN/mcl_mapgen_core/init.lua（cavern threshold、mg_flags.caves）
+  acceptance:
+    - 'python -c "from game.mapgen import is_cave; vals={is_cave(42,x,y,z) for x in range(16) for y in range(5,40) for z in range(16)}; assert True in vals and False in vals"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); cs=[generate_chunk(w,cx,cz) for cx in range(-1,2) for cz in range(-1,2)]; air=sum(1 for c in cs for x in range(16) for z in range(16) for y in range(5,25) if c.get(x,y,z)==\"air\"); assert air>0"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); c=generate_chunk(w,0,0); assert all(c.get(x,0,z)==\"bedrock\" for x in range(16) for z in range(16))"'
+  depends_on: [12, 10]
+
+- round: 18
+  title: 区块生成管线整合
+  goal: 把地形、群系、水体、洞穴、矿石、树木串成固定顺序的生成管线。
+  spec: |
+    generate_chunk 的固定顺序：1) 高度与地层；2) 群系表层；3) 水体；4) 洞穴；5) 矿石；6) 树木。
+    每一步只读取世界坐标与 seed，不依赖全局随机数、不依赖调用顺序。
+    同一 seed 同一区块重复生成必须得到逐字节相同的 voxels 列表。
+    不同 seed 的同一区块必须不同（至少地表高度或矿石分布不同）。
+    生成函数可重复调用，但每次都必须从干净的 Chunk 开始，避免叠加。
+  reference: mods/MAPGEN/mcl_mapgen_core/api.lua（register_on_generated 的 ore/deco 顺序）; mods/MAPGEN/mcl_mapgen_core/init.lua
+  acceptance:
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; a=generate_chunk(World(42),0,0).voxels; b=generate_chunk(World(42),0,0).voxels; assert a==b; c=generate_chunk(World(43),0,0).voxels; assert a!=c"'
+    - 'python -c "from game.world import World; from game.mapgen import generate_chunk; w=World(42); cs=[generate_chunk(w,cx,cz) for cx in range(-1,2) for cz in range(-1,2)]; assert any(v==\"water\" for c in cs for v in c.voxels)"'
+  depends_on: [13, 14, 15, 16, 17]
+
+- round: 19
+  title: 按需生成与区块缓存
+  goal: 让 World 在首次访问某区块时自动生成，并保证不会重复生成覆盖玩家改动。
+  spec: |
+    在 World 增加 ensure_chunk(cx,cz)->Chunk：若已在 generated 中直接返回现有区块。
+    若 autogenerate=True，调用 mapgen.generate_chunk(self,cx,cz) 并加入 generated；
+    若 autogenerate=False，创建空 Chunk 并加入 generated。
+    get_block/set_block 访问未生成区块时必须先 ensure_chunk。
+    重复 ensure 同一区块不得重建、不得覆盖已放置的方块。
+    自动生成不得写入 world.dirty。
+  reference: mods/MAPGEN/mcl_mapgen_core/api.lua（on_generated 回调、区块缓存）; mods/CORE/mcl_worlds/init.lua
+  acceptance:
+    - 'python -c "from game.world import World; w=World(seed=42, autogenerate=True); assert w.get_block(0,0,0)==\"bedrock\"; assert (0,0) in w.generated; w.set_block(0,10,0,\"stone\"); w.get_block(1,10,0); assert w.get_block(0,10,0)==\"stone\""'
+    - 'python -c "from game.world import World; w=World(seed=42, autogenerate=True); w.ensure_chunk(0,0); n=len(w.chunks); w.ensure_chunk(0,0); w.ensure_chunk(0,0); assert len(w.chunks)==n"'
+    - 'python -c "from game.world import World; w=World(seed=42, autogenerate=True); w.get_block(0,0,0); assert len(w.dirty)==0"'
+  depends_on: [18, 8]
+
+- round: 20
+  title: 玩家状态与视线向量
+  goal: 定义玩家位置与朝向，把 yaw/pitch 转成单位视线向量。
+  spec: |
+    新建 game/player.py，@dataclass Player：x,y,z 为眼睛位置（float），yaw/pitch 为角度，reach 默认 5.0。
+    look_vector()->tuple[float,float,float]：返回单位向量。
+    约定：yaw=0 朝 +Z；yaw 增大绕 Y 轴旋转；pitch=0 水平，pitch=-90 垂直向下，pitch=+90 垂直向上。
+    转换公式使用 math.radians/math.cos/math.sin，结果长度误差 <1e-6。
+    reach 必须 >0，否则构造时抛 ValueError。
+  reference: mods/PLAYER/mcl_player/init.lua（玩家朝向/控制）; mods/PLAYER/playerphysics/init.lua（玩家物理参数）
+  acceptance:
+    - 'python -c "from game.player import Player; p=Player(0.0,40.0,0.0,yaw=0.0,pitch=-90.0); v=p.look_vector(); assert abs(v[1]+1.0)<1e-6 and abs(v[0])<1e-6 and abs(v[2])<1e-6"'
+    - 'python -c "from game.player import Player; p=Player(0,40,0,yaw=90,pitch=0); v=p.look_vector(); assert abs(sum(x*x for x in v)-1.0)<1e-6; assert abs(v[0]-1.0)<1e-6"'
+  depends_on: [8]
+
+- round: 21
+  title: 射线拾取目标方块
+  goal: 从玩家眼睛沿视线做射线检测，返回 reach 内第一个可交互方块。
+  spec: |
+    Player.raycast(world, step=0.1)->tuple[int,int,int] | None。
+    从 (x,y,z) 沿 look_vector 前进，每步取整到方块坐标；总距离超过 reach 立即返回 None。
+    跳过 "air" 与 "water"，返回第一个其他方块的整数坐标。
+    必须能处理垂直向下/向上、以及斜向射线；同一位置不得重复返回。
+    这是纯查询，不得修改 world 或 dirty。
+  reference: mods/PLAYER/mcl_player/init.lua（LMB/RMB 指向）; mods/ITEMS/mcl_core/functions.lua（on_dignode/on_placenode）
+  acceptance:
+    - 'python -c "from game.world import World; from game.player import Player; w=World(seed=1); w.set_block(0,10,0,\"stone\"); w.set_block(0,11,0,\"air\"); w.set_block(0,12,0,\"air\"); p=Player(0.5,12.5,0.5,yaw=0,pitch=-90,reach=5); assert p.raycast(w)==(0,10,0)"'
+    - 'python -c "from game.world import World; from game.player import Player; w=World(seed=1); w.set_block(0,10,0,\"stone\"); p=Player(0.5,20.5,0.5,yaw=0,pitch=-90,reach=3); assert p.raycast(w) is None"'
+  depends_on: [20, 7]
+
+- round: 22
+  title: 玩家破坏方块
+  goal: 实现最基本的挖掘：命中可达方块后把它变成空气，并保护基岩。
+  spec: |
+    Player.dig(world)->bool：先 raycast；无目标返回 False。
+    若目标方块是 "bedrock" 或 hardness<0，返回 False 且不修改世界。
+    成功时把该位置设为 "air"，写 world.dirty，返回 True。
+    只允许破坏 solid=True 的方块；水/空气不应成为目标（由 raycast 保证，dig 里再防御一次）。
+    失败路径不得产生任何世界改动。
+  reference: mods/ITEMS/mcl_core/functions.lua（register_on_dignode）; mods/PLAYER/mcl_player/init.lua（LMB 挖掘）
+  acceptance:
+    - 'python -c "from game.world import World; from game.player import Player; w=World(seed=1); w.set_block(0,10,0,\"stone\"); w.set_block(0,11,0,\"air\"); w.set_block(0,12,0,\"air\"); p=Player(0.5,12.5,0.5,yaw=0,pitch=-90,reach=5); assert p.dig(w) is True; assert w.get_block(0,10,0)==\"air\""'
+    - 'python -c "from game.world import World; from game.player import Player; w=World(1); w.set_block(0,0,0,\"bedrock\"); [w.set_block(0,y,0,\"air\") for y in range(1,7)]; p=Player(0.5,7.5,0.5,yaw=0,pitch=-90,reach=8); assert p.dig(w) is False and w.get_block(0,0,0)==\"bedrock\""'
+  depends_on: [21, 6]
+
+- round: 23
+  title: 玩家放置方块
+  goal: 把方块放到命中面的外侧一格，并拒绝非法位置。
+  spec: |
+    Player.place(world, block_name:str)->bool：先 raycast 得到命中方块 pos。
+    放置位置 = pos + 命中面的法线方向；垂直向下射线时法线为 (0,1,0)，即放在命中方块上方一格。
+    目标位置必须可替换：block 为 "air"，或注册表里该方块 replaceable=True（第 4 轮 air 已满足）。
+    block_name 必须已注册且 solid=True；越界、超出 reach、目标非空且不可替换时返回 False。
+    成功时 world.set_block(...)，返回 True；失败不得修改世界。
+  reference: mods/ITEMS/mcl_core/functions.lua（register_on_placenode）; mods/PLAYER/mcl_player/init.lua（RMB 放置）
+  acceptance:
+    - 'python -c "from game.world import World; from game.player import Player; w=World(1); w.set_block(0,10,0,\"stone\"); w.set_block(0,11,0,\"air\"); p=Player(0.5,12.5,0.5,yaw=0,pitch=-90,reach=5); assert p.place(w,\"dirt\") is True; assert w.get_block(0,11,0)==\"dirt\""'
+    - 'python -c "from game.world import World; from game.player import Player; w=World(1); w.set_block(0,10,0,\"stone\"); w.set_block(0,11,0,\"air\"); p=Player(0.5,12.5,0.5,yaw=0,pitch=-90,reach=5); assert p.place(w,\"air\") is False"'
+    - 'python -c "from game.world import World; from game.player import Player; w=World(1); w.set_block(0,10,0,\"stone\"); w.set_block(0,11,0,\"air\"); p=Player(0.5,12.5,0.5,yaw=0,pitch=-90,reach=5); assert p.place(w,\"no_such_block\") is False"'
+  depends_on: [21, 4]
+
+- round: 24
+  title: 世界内存序列化
+  goal: 把世界状态转成纯 JSON 可序列化的字典，并能从字典还原。
+  spec: |
+    新建 game/storage.py，定义 SAVE_VERSION=1。
+    world_to_dict(world)->dict：包含 "version"、"seed"、"chunks"。
+    chunks 的键为 "cx,cz" 字符串，值为按 Chunk.index 顺序展开的方块名列表（长度 16384）。
+    dict_to_world(data)->World：还原 seed、chunks、generated；不重新生成地形。
+    输出必须能直接 json.dumps；输入字典不得被原地修改。
+  reference: 无直接 Lua 对应（Luanti 引擎内建 map.sqlite 存档）；参考 mods/CORE/mcl_worlds/init.lua 的世界元数据
+  acceptance:
+    - 'python -c "import json; from game.world import World; from game.storage import world_to_dict, dict_to_world; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); w.set_block(2,10,2,\"stone\"); d=world_to_dict(w); json.dumps(d); w2=dict_to_world(d); assert w2.seed==42; assert w2.get_block(2,10,2)==\"stone\"; assert w2.get_block(0,0,0)==\"bedrock\""'
+    - 'python -c "from game.world import World; from game.storage import world_to_dict; w=World(seed=1,autogenerate=True); w.get_block(0,0,0); d=world_to_dict(w); assert d[\"version\"]==1 and \"0,0\" in d[\"chunks\"] and len(d[\"chunks\"][\"0,0\"])==16*16*64"'
+  depends_on: [19]
+
+- round: 25
+  title: 存档写入磁盘
+  goal: 把序列化结果安全地写成本地 JSON 文件。
+  spec: |
+    save(world, path: str, only_dirty: bool=False)->str：返回实际写入路径。
+    自动创建父目录；用 UTF-8 写 JSON，缩进不限制但必须可被 json.load 解析。
+    使用“临时文件 + os.replace”原子替换，避免中途失败留下半个文件。
+    文件内容至少含 version/seed/chunks（only_dirty 的第 27 轮再扩展）。
+    写入失败应抛出异常，不得静默吞掉。
+  reference: 无直接 Lua 对应（引擎负责落盘）；参考 mods/CORE/mcl_worlds/init.lua
+  acceptance:
+    - 'python -c "import json,os,tempfile; from game.world import World; from game.storage import save; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); p=os.path.join(tempfile.mkdtemp(),\"w.json\"); r=save(w,p); assert os.path.exists(p) and os.path.getsize(p)>0; assert r==p; d=json.load(open(p,encoding=\"utf-8\")); assert \"seed\" in d and \"chunks\" in d"'
+    - 'python -c "import os,tempfile; from game.world import World; from game.storage import save; w=World(seed=1,autogenerate=True); w.get_block(0,0,0); p=os.path.join(tempfile.mkdtemp(),\"a\",\"b\",\"w.json\"); save(w,p); assert os.path.exists(p)"'
+  depends_on: [24]
+
+- round: 26
+  title: 存档读回与一致性
+  goal: 从磁盘读回世界，恢复方块状态，并校验存档版本。
+  spec: |
+    定义 StorageError(Exception)。
+    load(path: str)->World：读 JSON，校验 "version" 存在且等于 SAVE_VERSION，否则抛 StorageError。
+    还原 seed、全部 chunks、generated；读回后不得触发地图重新生成。
+    读回的世界与保存前在“已生成区块的所有方块”上逐格一致。
+    文件不存在或 JSON 损坏时也抛 StorageError，而不是裸 KeyError/JSONDecodeError。
+  reference: 无直接 Lua 对应（引擎 map.sqlite）；参考 mods/CORE/mcl_worlds/init.lua
+  acceptance:
+    - 'python -c "import os,tempfile; from game.world import World; from game.storage import save, load; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); w.set_block(5,20,5,\"iron_ore\"); p=os.path.join(tempfile.mkdtemp(),\"w.json\"); save(w,p); w2=load(p); assert w2.seed==42; assert w2.get_block(5,20,5)==\"iron_ore\"; assert w2.get_block(0,0,0)==\"bedrock\"; assert (0,0) in w2.generated"'
+    - |
+      python - <<PY
+      from game.storage import load, StorageError
+      for bad in ("no_such_file_12345.json",):
+          try:
+              load(bad)
+          except StorageError:
+              continue
+          raise SystemExit("expected StorageError")
+      print("OK")
+      PY
+  depends_on: [25]
+
+- round: 27
+  title: 增量存档与 dirty 跟踪
+  goal: 只保存玩家改动过的方块，并在读回时叠加到同种子生成的地形上。
+  spec: |
+    World.dirty 只记录 set_block 的玩家改动：键 (x,y,z)，值方块名；生成/读档过程不得写入。
+    world_to_dict(world, only_dirty=False)：only_dirty=True 时返回 {"version","seed","changes"}，
+    changes 为 [{"pos":[x,y,z],"block":name}, ...]，顺序按坐标排序，保证可复现。
+    save(world,path,only_dirty=True) 写出增量格式。
+    load 同时支持全量 chunks 与增量 changes：增量时用 seed 重新生成受影响区块，再逐个应用 changes。
+    增量读回后，未改动区域必须与纯生成结果一致。
+  reference: 无直接 Lua 对应；参考 mods/CORE/mcl_worlds/init.lua 与引擎区块持久化思路
+  acceptance:
+    - 'python -c "from game.world import World; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); w.set_block(1,5,1,\"stone\"); w.set_block(2,5,2,\"dirt\"); assert len(w.dirty)==2"'
+    - 'python -c "from game.world import World; from game.storage import world_to_dict; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); w.set_block(1,5,1,\"stone\"); w.set_block(2,5,2,\"dirt\"); d=world_to_dict(w,only_dirty=True); assert len(d[\"changes\"])==2; assert {tuple(c[\"pos\"]) for c in d[\"changes\"]}=={(1,5,1),(2,5,2)}"'
+    - 'python -c "import os,tempfile; from game.world import World; from game.storage import save, load; w=World(seed=42,autogenerate=True); w.get_block(0,0,0); w.set_block(1,5,1,\"stone\"); p=os.path.join(tempfile.mkdtemp(),\"d.json\"); save(w,p,only_dirty=True); w2=load(p); assert w2.get_block(1,5,1)==\"stone\"; assert w2.get_block(0,0,0)==\"bedrock\""'
+  depends_on: [26, 22, 23]
+
+- round: 28
+  title: 文本切片渲染
+  goal: 把某一高度的世界切片渲染成字符网格，提供最简可视化。
+  spec: |
+    新建 game/cli.py，render_slice(world,y,x0,z0,width=32,depth=16)->str。
+    行对应 z（从 z0 到 z0+depth-1），列对应 x（从 x0 到 x0+width-1），每行以 \n 分隔。
+    字符表：air=" "，stone="#"，dirt="."，grass=","，sand=":"，water="~"，wood="|"，leaves="*"，coal_ore="O"，iron_ore="o"，bedrock="B"，未知="?"。
+    提供 argparse 入口：python -m game.cli --seed 42 --y 32 打印切片并以 0 退出。
+    y 必须在 [0,64)，width/depth 必须 >0，否则抛 ValueError。
+  reference: 无直接 Lua 对应（Luanti 用 Irrlicht 渲染）；参考 mods/HUD/ 的界面分层思路
+  acceptance:
+    - 'python -c "from game.world import World; from game.cli import render_slice; w=World(42,autogenerate=True); s=render_slice(w,y=5,x0=0,z0=0,width=4,depth=4); lines=s.splitlines(); assert len(lines)==4 and all(len(l)==4 for l in lines)"'
+    - 'python -c "from game.world import World; from game.cli import render_slice; w=World(42,autogenerate=True); w.set_block(0,10,0,\"stone\"); s=render_slice(w,10,0,0,1,1); assert s.strip()==\"#\""'
+    - 'python -c "import subprocess,sys; r=subprocess.run([sys.executable,\"-m\",\"game.cli\",\"--seed\",\"42\",\"--y\",\"32\"],capture_output=True,text=True); assert r.returncode==0, r.stderr[-1000:]; assert r.stdout.strip()"'
+  depends_on: [19]
+
+- round: 29
+  title: 端到端演示脚本
+  goal: 用一条命令串起生成、破坏、放置、存档、读回、校验的完整流程。
+  spec: |
+    新建 game/demo.py，main()->int，并在 __main__ 中 sys.exit(main())。
+    流程：World(seed=42,autogenerate=True) -> 取一个地表草方块坐标 -> Player 从上方俯视 dig -> place 一个 stone -> 保存到临时文件 -> load -> 逐格比较改动点。
+    任何一步失败打印 "DEMO_FAIL: <原因>" 到 stderr 并返回 1。
+    全部通过时打印 "DEMO_OK" 并返回 0。
+    只使用标准库与临时目录，不写项目目录、不访问网络。
+  reference: 综合 mods/MAPGEN/mcl_mapgen_core/api.lua、mods/PLAYER/mcl_player/init.lua、mods/ITEMS/mcl_core/functions.lua 的流程
+  acceptance:
+    - 'python -c "import subprocess,sys; r=subprocess.run([sys.executable,\"-m\",\"game.demo\"],capture_output=True,text=True); assert r.returncode==0, r.stderr[-2000:]; assert \"DEMO_OK\" in r.stdout"'
+    - 'python -c "import subprocess,sys; r=subprocess.run([sys.executable,\"-m\",\"game.demo\"],capture_output=True,text=True,timeout=60); assert r.returncode==0"'
+  depends_on: [19, 22, 23, 26]
+
+- round: 30
+  title: 回归测试套件与一键验证
+  goal: 把前 29 轮的验收固化成 unittest 套件，一条命令证明子系统可跑。
+  spec: |
+    新建 tests/ 目录，使用标准库 unittest，至少 15 个测试方法。
+    覆盖：注册表/校验、噪声确定性、height_at 范围、地层与水体、群系、矿石、树木、洞穴、
+    区块缓存、raycast/dig/place、序列化/存档/增量读回、render_slice。
+    测试必须自包含：不依赖当前工作目录里的存档文件，不访问网络，单次运行 <60 秒。
+    python -m unittest discover -s tests -q 必须返回 0。
+  reference: mods/CORE/vl_unittests（游戏内测试框架的组织方式）; 前 29 轮各自的模块
+  acceptance:
+    - 'python -c "import subprocess,sys; r=subprocess.run([sys.executable,\"-m\",\"unittest\",\"discover\",\"-s\",\"tests\",\"-q\"],capture_output=True,text=True,timeout=120); assert r.returncode==0, r.stderr[-3000:]"'
+    - 'python -c "import subprocess,sys; r=subprocess.run([sys.executable,\"-m\",\"unittest\",\"discover\",\"-s\",\"tests\",\"-v\"],capture_output=True,text=True,timeout=120); assert r.stderr.count(\" ... ok\")>=15"'
+  depends_on: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
