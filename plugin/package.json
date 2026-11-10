@@ -21,6 +21,7 @@
     "plan.js",
     "engine.js",
     "reasoning.js",
+    "prompt.txt",
     "cordis.patch.yml",
     "LICENSE",
     "LICENSE.upstream",

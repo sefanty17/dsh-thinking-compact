@@ -4,11 +4,14 @@
  * 跑法：node --test plugin/test
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   acceptSummary,
   buildPrompt,
+  PLACEHOLDER,
+  PROMPT,
   reasoningText,
   renderCardText,
   selectReasoningChunk,
@@ -168,5 +171,12 @@ test("提示词占位符能替换，且思考块能抽出来", () => {
   assert.equal(text, "abc");
   const prompt = buildPrompt("要压的东西");
   assert.ok(prompt.includes("要压的东西"));
-  assert.ok(!prompt.includes("<<<{TEXT}>>>"));
+  assert.ok(!prompt.includes("{TEXT}"));
+});
+
+test("提示词与 bench 里的定版逐字节一致", () => {
+  const canonical = readFileSync(new URL("../../bench/samples/compress_prompt.txt", import.meta.url), "utf8")
+    .replace(/\r\n/g, "\n");
+  assert.equal(PROMPT, canonical, "plugin/prompt.txt 与 bench/samples/compress_prompt.txt 必须逐字节一致");
+  assert.ok(PROMPT.includes(PLACEHOLDER), "占位符必须是三行形态 <<< / {TEXT} / >>>");
 });

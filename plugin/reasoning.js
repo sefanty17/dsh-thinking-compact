@@ -13,20 +13,16 @@
  * 3. 思考 token 与切段 token 都要过阈值，不达标就不切。
  */
 
-/** 缩句提示词。与 bench/samples/compress_prompt.txt 逐字节一致，有测试守着。 */
-export const PROMPT = `你在压缩一段模型的思考过程。
+import { readFileSync } from "node:fs";
 
-这段文字是我（模型）上一轮的原话思考。请把它缩句成一段更短的、第一人称的思考记录：
-- 保留第一人称口气和转折词（"等等""但是""先看看""不对"这类），读起来要像我当时自己想的；
-- 保留判断依据、数值、函数名、文件路径、被否掉的方案及其原因；
-- 删掉重复验算、自我重复、无信息的填充句；
-- 不要改写成第三人称或旁白，不要写成 JSON / 列表 / 小标题，不要加原文没有的判断，
-  不要把"可能/也许"升级成"确定"；
-- 只输出缩句后的正文，不要解释你在做什么。
+/**
+ * 缩句提示词：直接读 prompt.txt，不从代码里转抄。
+ * prompt.txt 与 bench/samples/compress_prompt.txt 逐字节一致，有测试守着。
+ */
+export const PROMPT = readFileSync(new URL("./prompt.txt", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
-要压缩的思考：
-
-<<<{TEXT}>>>`;
+/** 占位符是三行形态：<<< / {TEXT} / >>> */
+export const PLACEHOLDER = "<<<\n{TEXT}\n>>>";
 
 /** 思考块在 DSH 的 Message 里是 { type: "reasoning", text }。 */
 export function reasoningText(messages) {
@@ -218,11 +214,11 @@ export function renderCardText({ summary, messages, seqStart, seqEnd }) {
   return lines.join("\n");
 }
 
-/** 把一段思考塞进提示词。占位符只有一处，替换失败就返回 null。 */
+/** 把一段思考塞进提示词。占位符缺失就返回 null，绝不发一段没装正文的提示词。 */
 export function buildPrompt(text) {
   if (!text || !text.trim()) return null;
-  if (!PROMPT.includes("<<<{TEXT}>>>")) return null;
-  return PROMPT.replace("<<<{TEXT}>>>", () => text);
+  if (!PROMPT.includes(PLACEHOLDER)) return null;
+  return PROMPT.replace(PLACEHOLDER, () => text);
 }
 
 /** 摘要校验：非空、不是 JSON、不比原文长。 */
