@@ -21,7 +21,7 @@ if (process.env.SPINE_ENGINE_FAIL === "import") {
   loadError = new Error("spine: engine import refused");
 } else {
   try {
-    const engine = await import("./index.js");
+    const engine = await import("./engine.js");
     Engine = engine.default;
   } catch (error) {
     loadError = error instanceof Error ? error : new Error(String(error));
