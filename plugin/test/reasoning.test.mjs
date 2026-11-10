@@ -15,6 +15,7 @@ import {
   reasoningText,
   renderCardText,
   selectReasoningChunk,
+  summarizationTarget,
 } from "../reasoning.js";
 
 const UNIT = "核对 A1 的物流节点，承诺 48 小时，实际 72 小时，差值 24 小时；";
@@ -166,6 +167,22 @@ test("摘要校验：空 / JSON / 比原文长 都拒", () => {
   assert.equal(acceptSummary("像我自己想的缩句。", "原文很长".repeat(20)), "像我自己想的缩句。");
 });
 
+test("摘要路由三层兜底：配置 > 请求头 > agent 选项", () => {
+  assert.deepEqual(
+    summarizationTarget({ summarizationProvider: "a", summarizationModel: "m1" }, {}),
+    { provider: "a", model: "m1" },
+  );
+  assert.deepEqual(
+    summarizationTarget({}, { session: { requestHeader: () => ({ config: { provider: "b", model: "m2" } }) } }),
+    { provider: "b", model: "m2" },
+  );
+  assert.deepEqual(
+    summarizationTarget({}, { options: { provider: "c", model: "m3" } }),
+    { provider: "c", model: "m3" },
+  );
+  assert.equal(summarizationTarget({ summarizationProvider: "", summarizationModel: "" }, {}), null);
+});
+
 test("提示词占位符能替换，且思考块能抽出来", () => {
   const text = reasoningText([{ content: [{ type: "reasoning", text: "abc" }] }]);
   assert.equal(text, "abc");
@@ -179,4 +196,13 @@ test("提示词与 bench 里的定版逐字节一致", () => {
     .replace(/\r\n/g, "\n");
   assert.equal(PROMPT, canonical, "plugin/prompt.txt 与 bench/samples/compress_prompt.txt 必须逐字节一致");
   assert.ok(PROMPT.includes(PLACEHOLDER), "占位符必须是三行形态 <<< / {TEXT} / >>>");
+});
+
+test("思考 token 阈值可配置，默认 4000", async () => {
+  const { DEFAULTS, ENV, readSettings } = await import("../settings.js");
+  assert.equal(DEFAULTS.reasoningTokens, 4000);
+  assert.equal(ENV.reasoningTokens, "SPINE_REASONING_TOKENS");
+  assert.equal(readSettings({}).reasoningTokens, 4000);
+  assert.equal(readSettings({ reasoningTokens: 200 }).reasoningTokens, 200);
+  assert.equal(readSettings({}, { SPINE_REASONING_TOKENS: "500" }).reasoningTokens, 500);
 });

@@ -8,6 +8,7 @@ export const DEFAULTS = Object.freeze({
   pointerTokens: 0, // 0 = 跟随 chunkMax
   chunkMin: 1000, // 不够这一刀就不切
   chunkMax: 32000, // 一刀上限，等于卡片轨道
+  reasoningTokens: 4000, // 切段内思考 token 之和到这个数才值得缩句
   bigGate: 650000, // 绝对停切线
   cooldownMs: 0, // 0 = 只用 seq 一次性跳过
 });
@@ -20,6 +21,7 @@ export const ENV = Object.freeze({
   pointerTokens: "SPINE_POINTER_TOKENS",
   chunkMin: "SPINE_CHUNK_MIN",
   chunkMax: "SPINE_CHUNK_MAX",
+  reasoningTokens: "SPINE_REASONING_TOKENS",
   cooldownMs: "SPINE_COOLDOWN_MS",
 });
 
@@ -125,6 +127,9 @@ export function configSchema(z, stockSchema) {
       .volatile(),
     chunkMax: count(1)
       .description("一刀的最大量，和卡片轨道同为 32000。")
+      .volatile(),
+    reasoningTokens: count(0)
+      .description("切段内思考 token 之和到这个数才值得缩句，默认 4000。")
       .volatile(),
     bigGate: count(1)
       .description("绝对停切线，超过就不再做小切，交给官方大压缩。")

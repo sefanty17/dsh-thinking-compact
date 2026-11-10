@@ -22,7 +22,7 @@ import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
 import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, jobCutDecision, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, contentHash, rawExcerptText, readRawToolResult, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
-import { acceptSummary, buildPrompt, reasoningText, renderCardText, selectReasoningChunk } from "./reasoning.js";
+import { acceptSummary, buildPrompt, reasoningText, renderCardText, selectReasoningChunk, summarizationTarget } from "./reasoning.js";
 import {
   discardShadowFiles,
   ensureShadowDir,
@@ -54,6 +54,10 @@ const URGENT_TOKENS = 48000;
 const MAX_TAIL = 2200;
 const MAX_TRACKED_SESSIONS = 64;
 const DEFAULT_KEY = "__default__";
+const CAPTURE_EVENT_BATCH = 128;
+const CAPTURE_RESULT_BATCH = 1;
+const RECOVER_RAW_BATCH = 1;
+const CAPTURE_RETRY_LIMIT = 8;
 
 function eventContent(session, seq) {
   const event = session.eventAt(seq);
@@ -462,7 +466,14 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   callIndex = new Map();
   captureCursor = new Map();
   pendingCaptures = new Set();
+  pendingCaptureJobs = new Map();
   pendingCaptureKeys = new Set();
+  pendingCatchups = new Map();
+  pendingCatchupJobs = new Set();
+  pendingCuts = new Set();
+  captureRetryStats = new Map();
+  retryableCaptureSeqs = new Map();
+  retryableCaptureSeeded = new Set();
   pruneGuarded = false;
 
   constructor(ctx, config, resolvedConfig) {
@@ -472,9 +483,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     this.liveConfig = config;
     try {
-      const pendingCuts = new Set();
       ctx.effect(() => async () => {
-        await Promise.allSettled([...pendingCuts, ...this.pendingCaptures]);
+        await Promise.allSettled([...this.pendingCuts, ...this.pendingCaptures, ...this.pendingCatchupJobs]);
       });
       ctx.on("session/event", (session, event) => {
         try {
@@ -492,17 +502,22 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             scheduleImmediate(() => {
               try {
                 const current = this.rawSeen.get(key);
-                if (!current || current.retryable) this.captureOne(session, event);
+                if (!current || current.retryable) {
+                  const record = this.captureOne(session, event);
+                  this.noteCaptureResult(session, event, record);
+                }
               } catch (error) {
                 noteShadowWarning(ctx.logger, error);
               } finally {
                 this.pendingCaptureKeys.delete(key);
                 this.pendingCaptures.delete(job);
+                if (this.pendingCaptureJobs.get(key) === job) this.pendingCaptureJobs.delete(key);
                 resolve();
               }
             });
           });
           this.pendingCaptures.add(job);
+          this.pendingCaptureJobs.set(key, job);
         } catch (error) {
           noteShadowWarning(ctx.logger, error);
         }
@@ -515,13 +530,13 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const done = events.some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
         if (!done) return;
         state.warming = true;
-        const job = this.finishTurn(agent, events)
+        const job = this.finishTurn(agent, events, { deferCapture: true })
           .catch((error) => noteShadowWarning(this.ctx?.logger, error))
           .finally(() => {
             state.warming = false;
-            pendingCuts.delete(job);
+            this.pendingCuts.delete(job);
           });
-        pendingCuts.add(job);
+        this.pendingCuts.add(job);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -571,13 +586,167 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     return planMessages(messages);
   }
 
-  async finishTurn(agent, events) {
+  scheduleCaptureCatchup(agent, events, settings) {
+    this.pendingCatchups ||= new Map();
+    this.pendingCatchupJobs ||= new Set();
+    this.pendingCuts ||= new Set();
+    const key = sessionKey(agent);
+    let task = this.pendingCatchups.get(key);
+    if (task) {
+      task.agent = agent;
+      task.session = agent.session;
+      task.events = events;
+      task.settings = settings;
+      return task;
+    }
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    task = {
+      key,
+      agent,
+      session: agent.session,
+      events,
+      settings,
+      phase: "events",
+      eventIndex: 0,
+      recoverIndex: 0,
+      visibleIds: null,
+      scheduled: false,
+      retryRequested: false,
+      captureRetryAttempts: 0,
+      progressed: false,
+      eventTail: Number.isInteger(events?.at?.(-1)?.seq) ? events.at(-1).seq : -1,
+      surfaceTail: agent.session.surface?.nodes?.at?.(-1) ?? -1,
+      resolve,
+      promise,
+    };
+    this.pendingCatchups.set(key, task);
+    this.pendingCatchupJobs.add(promise);
+    this.queueCaptureCatchup(task);
+    return task;
+  }
+
+  queueCaptureRetry(task) {
+    if (!task || task.finished || task.scheduled) return;
+    task.scheduled = true;
+    const delay = Math.min(250, 10 * (2 ** Math.max(0, task.captureRetryAttempts - 1)));
+    setTimeout(() => {
+      task.scheduled = false;
+      if (!task.finished) this.queueCaptureCatchup(task);
+    }, delay);
+  }
+
+  queueCaptureCatchup(task) {
+    if (!task || task.scheduled) return;
+    task.scheduled = true;
+    scheduleImmediate(() => {
+      task.scheduled = false;
+      try {
+        const latest = task.session.snapshotEvents?.();
+        const latestTail = Number.isInteger(latest?.at?.(-1)?.seq) ? latest.at(-1).seq : -1;
+        const latestSurfaceTail = task.session.surface?.nodes?.at?.(-1) ?? -1;
+        if (Array.isArray(latest) && (latestTail !== task.eventTail || latest.length !== task.events.length)) {
+          task.events = latest;
+          task.eventTail = latestTail;
+          if (task.phase === "visible") {
+            task.phase = "events";
+            task.visibleIds = null;
+            task.recoverIndex = 0;
+          }
+        }
+        if (latestSurfaceTail !== task.surfaceTail) {
+          task.surfaceTail = latestSurfaceTail;
+          if (task.phase === "visible") {
+            task.visibleIds = [...new Set(this.surfaceToolIds(task.session))];
+            task.recoverIndex = 0;
+          }
+        }
+        if (task.phase === "events") {
+          const result = this.captureNewBatch(task.session, task.events, task.settings, {
+            eventLimit: CAPTURE_EVENT_BATCH,
+            resultLimit: CAPTURE_RESULT_BATCH,
+            startIndex: task.eventIndex,
+          });
+          task.eventIndex = result.nextIndex;
+          task.progressed ||= result.progressed;
+          if (result.retryable) {
+            task.captureRetryAttempts += 1;
+            const previousMax = this.captureRetryStats?.get(task.key) || 0;
+            if (task.captureRetryAttempts > previousMax) this.captureRetryStats.set(task.key, task.captureRetryAttempts);
+            if (task.captureRetryAttempts >= CAPTURE_RETRY_LIMIT) {
+              this.finishCaptureCatchup(task);
+              return;
+            }
+            this.queueCaptureRetry(task);
+            return;
+          }
+          if (result.progressed) task.captureRetryAttempts = 0;
+          if (!result.done) {
+            this.queueCaptureCatchup(task);
+            return;
+          }
+          task.phase = "visible";
+          task.recoverIndex = 0;
+          task.visibleIds = [...new Set(this.surfaceToolIds(task.session))];
+        }
+        const recovered = this.recoverVisibleRawBatch(task.session, {}, task.recoverIndex, RECOVER_RAW_BATCH, task.visibleIds);
+        task.progressed ||= recovered.progressed;
+        task.recoverIndex = recovered.nextIndex;
+        if (!recovered.done) {
+          this.queueCaptureCatchup(task);
+          return;
+        }
+        this.finishCaptureCatchup(task);
+      } catch (error) {
+        noteShadowWarning(this.ctx?.logger, error);
+        this.finishCaptureCatchup(task);
+      }
+    });
+  }
+
+  finishCaptureCatchup(task) {
+    if (!task || task.finished) return;
+    task.finished = true;
+    this.pendingCatchups.delete(task.key);
+    this.pendingCatchupJobs.delete(task.promise);
+    task.resolve();
+    if (task.retryRequested && task.progressed) this.scheduleMaintenanceRetry(task.agent);
+  }
+
+  scheduleMaintenanceRetry(agent) {
+    const state = this.stateFor(agent);
+    if (state.retryScheduled) return;
+    state.retryScheduled = true;
+    scheduleImmediate(() => {
+      state.retryScheduled = false;
+      if (state.warming) return;
+      const events = agent.session.snapshotEvents();
+      const done = events.some((event) => event.type === "turn/end" && event.data?.reason?.kind === "completed");
+      if (!done) return;
+      state.warming = true;
+      const job = this.finishTurn(agent, events, { deferCapture: true })
+        .catch((error) => noteShadowWarning(this.ctx?.logger, error))
+        .finally(() => {
+          state.warming = false;
+          this.pendingCuts.delete(job);
+        });
+      this.pendingCuts.add(job);
+    });
+  }
+
+  async finishTurn(agent, events, options = {}) {
     const settings = readSettings(this.liveConfig);
     const state = this.stateFor(agent);
     const signal = AbortSignal.timeout(30000);
     const ev = events || agent.session.snapshotEvents();
-    await this.flushPendingCaptures();
-    this.captureNew(agent.session, ev, settings);
+    const deferCapture = options.deferCapture === true;
+    const catchup = deferCapture
+      ? this.scheduleCaptureCatchup(agent, ev, settings)
+      : { finished: true, progressed: false, retryRequested: false };
+    if (!deferCapture) {
+      await this.flushPendingCaptures();
+      this.captureNew(agent.session, ev, settings);
+    }
     const jobs = collectJobs(ev);
     const calls = indexToolCalls(ev);
     try {
@@ -636,6 +805,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           try {
             state.localOnly = true;
             state.approvedCard = chunk.card;
+            if (deferCapture) await this.flushPendingCaptures(agent.session, this.chunkToolCallIds(agent.session, chunk));
             await this.commitSelectedSpan(agent, chunk, op);
             measurement = this.ctx.tokenMeter.measure(agent.session);
             const after = measurement.totalTokens;
@@ -656,6 +826,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved}`);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (message.includes("raw backup missing before cut")) {
+              catchup.retryRequested = true;
+              if (catchup.finished && catchup.progressed) this.scheduleMaintenanceRetry(agent);
+            }
             this.ctx.logger?.warn?.(`spine cut failed: ${message}`);
             break;
           }
@@ -678,9 +852,33 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     }
   }
 
-  async flushPendingCaptures() {
-    if (!this.pendingCaptures?.size) return;
-    await Promise.allSettled([...this.pendingCaptures]);
+  async flushPendingCaptures(session = null, ids = null) {
+    if (!session) {
+      if (!this.pendingCaptures?.size) return;
+      await Promise.allSettled([...this.pendingCaptures]);
+      return;
+    }
+    const key = session.id || DEFAULT_KEY;
+    const pendingIds = ids || this.surfaceToolIds(session);
+    const jobs = [...new Set(pendingIds)]
+      .map((id) => this.pendingCaptureJobs?.get?.(`${key}\0${id}`))
+      .filter(Boolean);
+    if (jobs.length) await Promise.allSettled(jobs);
+  }
+
+  chunkToolCallIds(session, chunk) {
+    const nodes = session?.surface?.nodes || [];
+    const start = nodes.indexOf(chunk?.start);
+    const end = nodes.indexOf(chunk?.end);
+    if (start < 0 || end < start) return [];
+    const ids = [];
+    for (const seq of nodes.slice(start, end + 1)) {
+      const event = session.eventAt?.(seq);
+      if (event?.type !== "tool/result") continue;
+      const id = event.data?.message?.toolCallId;
+      if (id) ids.push(id);
+    }
+    return ids;
   }
 
   async commitSelectedSpan(agent, chunk, signal) {
@@ -716,7 +914,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const event = session.eventAt(seq);
       if (event?.type === "tool/result") {
         const id = event.data?.message?.toolCallId;
-        if (!id || !verifiedRaw(this.rawSeen.get(this.rawKey(session, id))).ok) {
+        const raw = id ? this.rawSeen.get(this.rawKey(session, id)) : null;
+        if (!id || !verifiedRaw(raw).ok) {
           throw new Error(`spine: raw backup missing before cut: ${id || "unknown"}`);
         }
       }
@@ -972,19 +1171,109 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     }
   }
 
-  captureNew(session, events, settings = readSettings(this.liveConfig)) {
-    if (!Array.isArray(events)) events = [];
+  noteCaptureResult(session, event, record) {
+    const key = session?.id || DEFAULT_KEY;
+    this.retryableCaptureSeqs ||= new Map();
+    this.retryableCaptureSeeded ||= new Set();
+    let seqs = this.retryableCaptureSeqs.get(key);
+    if (!seqs) {
+      seqs = new Set();
+      this.retryableCaptureSeqs.set(key, seqs);
+    }
+    const seq = Number.isInteger(event?.seq) ? event.seq : null;
+    if (seq === null) return;
+    if (record?.retryable) seqs.add(seq);
+    else seqs.delete(seq);
+  }
+
+  captureCursorStart(session, events, settings) {
     const key = session?.id || DEFAULT_KEY;
     let cursor = this.captureCursor.has(key) ? this.captureCursor.get(key) : this.readCaptureCursor(key);
     if (cursor == null) cursor = restartCaptureCursor(events, settings.keepRounds);
     if (!Number.isSafeInteger(cursor) || cursor < 0 || events.length < cursor) cursor = restartCaptureCursor(events, settings.keepRounds);
-    // A live event callback may have failed before the recent-three restart
-    // boundary. Keep those visible originals eligible without replaying history.
-    for (const seq of session?.surface?.nodes || []) {
-      const event = session.eventAt?.(seq);
-      const id = event?.type === "tool/result" && event.data?.message?.toolCallId;
-      if (id && this.rawSeen.get(this.rawKey(session, id))?.retryable) cursor = Math.min(cursor, seq);
+    this.retryableCaptureSeqs ||= new Map();
+    this.retryableCaptureSeeded ||= new Set();
+    let retryable = this.retryableCaptureSeqs.get(key);
+    if (!retryable) {
+      retryable = new Set();
+      this.retryableCaptureSeqs.set(key, retryable);
     }
+    if (!this.retryableCaptureSeeded.has(key)) {
+      for (const seq of session?.surface?.nodes || []) {
+        const event = session.eventAt?.(seq);
+        const id = event?.type === "tool/result" && event.data?.message?.toolCallId;
+        if (id && this.rawSeen.get(this.rawKey(session, id))?.retryable) retryable.add(seq);
+      }
+      this.retryableCaptureSeeded.add(key);
+    }
+    if (retryable.size) cursor = Math.min(cursor, Math.min(...retryable));
+    return cursor;
+  }
+
+  captureNewBatch(session, events, settings = readSettings(this.liveConfig), limits = {}) {
+    if (!Array.isArray(events)) events = [];
+    const key = session?.id || DEFAULT_KEY;
+    const cursor = this.captureCursorStart(session, events, settings);
+    let next = cursor;
+    let retry = null;
+    let processed = 0;
+    let captures = 0;
+    let progressed = false;
+    let exhausted = true;
+    const seen = new Set();
+    const eventLimit = Math.max(1, limits.eventLimit || CAPTURE_EVENT_BATCH);
+    const resultLimit = Math.max(1, limits.resultLimit || CAPTURE_RESULT_BATCH);
+    let index = Math.max(0, Number.isInteger(limits.startIndex) ? limits.startIndex : 0);
+    const indexedSeq = Number.isInteger(events[index]?.seq) ? events[index].seq : null;
+    if (index > 0 && indexedSeq !== null && indexedSeq > cursor) {
+      const rewind = events.findIndex((event) => Number.isInteger(event?.seq) && event.seq >= cursor);
+      index = rewind >= 0 ? rewind : 0;
+    }
+    for (; index < events.length; index += 1) {
+      const event = events[index];
+      const seq = Number.isInteger(event?.seq) ? event.seq : next;
+      if (seq < cursor) continue;
+      this.noteEvent(session, event);
+      if (event?.type === "tool/result") {
+        const id = event.data?.message?.toolCallId;
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          const cached = this.rawSeen.get(this.rawKey(session, id));
+          const record = cached && !cached.retryable ? cached : this.captureOne(session, event);
+          if (!cached || cached.retryable) {
+            if (record?.ok) progressed = true;
+            captures += 1;
+          }
+          this.noteCaptureResult(session, event, record);
+          if (record?.retryable && retry === null) retry = seq;
+        }
+      }
+      next = seq + 1;
+      processed += 1;
+      if (retry !== null || processed >= eventLimit || captures >= resultLimit) {
+        exhausted = false;
+        index += 1;
+        break;
+      }
+    }
+    next = retry ?? next;
+    this.captureCursor.set(key, next);
+    this.writeCaptureCursor(key, next);
+    const lastEvent = events.at(-1);
+    const lastSeq = Number.isInteger(lastEvent?.seq) ? lastEvent.seq : events.length - 1;
+    return {
+      seen,
+      progressed,
+      retryable: retry !== null,
+      done: exhausted && retry === null && next > lastSeq,
+      nextIndex: index,
+    };
+  }
+
+  captureNew(session, events, settings = readSettings(this.liveConfig)) {
+    if (!Array.isArray(events)) events = [];
+    const key = session?.id || DEFAULT_KEY;
+    const cursor = this.captureCursorStart(session, events, settings);
     let next = cursor;
     let retry = null;
     const seen = new Set();
@@ -998,6 +1287,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           seen.add(id);
           const cached = this.rawSeen.get(this.rawKey(session, id));
           const record = cached && !cached.retryable ? cached : this.captureOne(session, event);
+          this.noteCaptureResult(session, event, record);
           if (record?.retryable && retry === null) retry = seq;
         }
       }
@@ -1073,6 +1363,29 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         this.rawSeen.set(mapKey, { ok: false, reason: "unwritable", toolCallId: id });
       }
     }
+  }
+
+  recoverVisibleRawBatch(session, access = {}, startIndex = 0, limit = RECOVER_RAW_BATCH, visibleIds = null) {
+    const ids = visibleIds || [...new Set(this.surfaceToolIds(session))];
+    const dir = sessionDir(shadowDirectory(), session?.id || DEFAULT_KEY);
+    let index = Math.max(0, startIndex);
+    let processed = 0;
+    let progressed = false;
+    while (index < ids.length && processed < Math.max(1, limit)) {
+      const id = ids[index++];
+      const mapKey = this.rawKey(session, id);
+      if (this.rawSeen.has(mapKey)) continue;
+      try {
+        const record = readRawToolResult({ dir, toolCallId: id, access });
+        this.rawSeen.set(mapKey, record);
+        progressed ||= Boolean(record?.ok);
+      } catch (error) {
+        noteShadowWarning(this.ctx?.logger, error);
+        this.rawSeen.set(mapKey, { ok: false, reason: "unwritable", toolCallId: id });
+      }
+      processed += 1;
+    }
+    return { nextIndex: index, done: index >= ids.length, progressed };
   }
 
   captureSession(session) {
@@ -1182,9 +1495,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   async summarizeReasoning(reasoning, input, agent, signal) {
     const prompt = buildPrompt(reasoning);
     if (!prompt) throw new Error("thinking-compact: prompt 缺少占位符");
-    const provider = this.config?.summarizationProvider;
-    const model = this.config?.summarizationModel;
-    if (!provider || !model) throw new Error("thinking-compact: 摘要路由未解析出来");
+    const target = summarizationTarget(this.config, agent);
+    if (!target) throw new Error("thinking-compact: 摘要路由未解析出来（config / 请求头 / agent 选项都没有 provider+model）");
+    const { provider, model } = target;
     let text = "";
     for await (const chunk of this.ctx.llm.stream({
       provider,
@@ -1192,6 +1505,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
       maxTokens: 8192,
       temperature: 0,
+      sessionId: agent?.session?.id,
+      purpose: "compaction",
       signal,
     })) {
       if (chunk?.type === "text-delta") text += chunk.text ?? "";

@@ -214,6 +214,22 @@ export function renderCardText({ summary, messages, seqStart, seqEnd }) {
   return lines.join("\n");
 }
 
+/**
+ * 摘要用哪个 provider/model：显式配置 > 最近一次请求的模型 > agent 选项。
+ * 官方 summarizeWithLlm 就是这三层；只读 config 那一层在默认 profile 下是空串，
+ * 会让思考链永远压不动（静默降级成"每轮都跳过"）。
+ */
+export function summarizationTarget(config, agent) {
+  const provider = config?.summarizationProvider;
+  const model = config?.summarizationModel;
+  if (provider && model) return { provider, model };
+  const latest = agent?.session?.requestHeader?.()?.config;
+  if (latest?.provider && latest?.model) return { provider: latest.provider, model: latest.model };
+  const options = agent?.options;
+  if (options?.provider && options?.model) return { provider: options.provider, model: options.model };
+  return null;
+}
+
 /** 把一段思考塞进提示词。占位符缺失就返回 null，绝不发一段没装正文的提示词。 */
 export function buildPrompt(text) {
   if (!text || !text.trim()) return null;
