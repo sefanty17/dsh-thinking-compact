@@ -3,12 +3,13 @@
 把 DSH 历史轮次里的**思考链**压成一段第一人称摘录卡片，工具调用与工具结果原文照抄。
 宿主是 DSH 本体，压缩结果通过 `surfaceOp: { op: "replace" }` 写进会话事件，天然驻留。
 
-> 状态：**改造中**。选段与卡片已替换并通过离线测试；尚未装进真实 profile 跑通。
+> 状态：选段与卡片已替换，离线测试 11/11；装配链路已在 headless profile 验证；**尚未在真实会话里跑出过一次切刀**。
 
 ## 这份代码从哪来
 
-骨架 fork 自 [dsh-live-compact](https://github.com/MerkyorLynn/dsh-live-compact) v1.1.3（MIT，
-见 `LICENSE.upstream`）。它解决的是「工具结果太长」，本插件解决「思考链太长」，
+骨架 fork 自 [dsh-live-compact](https://github.com/MerkyorLynn/dsh-live-compact) v1.1.3，已对齐 **v1.1.4**（MIT，
+见 `LICENSE.upstream`）。v1.1.4 只有一处改动：把每轮结束时的 raw 补扫从关键路径上摘成
+分片后台任务，修掉长会话冻结（[issue #34](https://github.com/Tranquillitatis-Lab/dsh-live-compact/issues/34)）。它解决的是「工具结果太长」，本插件解决「思考链太长」，
 所以引擎骨架、checkpoint 协议、shadow 备份、tool pairing 校验全部沿用，只换三处。
 
 ## 只换三个函数
@@ -25,7 +26,7 @@ tool pairing、摘要必须比原文小）、`compaction/start|summary|end` 三�
 
 ## 选段规则
 
-和 Python 版 `select_tail` 一致，三条硬约束：
+三条硬约束：
 
 1. **只切完整助手轮**：每个 `tool-call` 必须等到对应 `tool/result`，否则这轮不动
    （切了会留下孤立 tool_use，上游直接 400）。
@@ -55,9 +56,9 @@ node --test plugin/test/reasoning.test.mjs
 
 ## 还没做的
 
-- 没在真实 profile 里跑过一次，`shell.js` 那条加载链路（含 peer 依赖解析）未验证。
+- 没在真实会话里跑出过一次切刀：`compaction/summary` 是否真落进会话日志、卡片是否出现在下一轮请求里，都未验证。
 - `plan.js` 里工具结果摘录那套启发式（约 1100 行）现在用不到了，还没删。
-- shadow 备份尚未接入我们的切段路径（当前沿用参照物的 raw 捕获，只覆盖工具结果）。
+- shadow 备份尚未接入我们的切段路径（当前沿用参照物的 raw 捕获，只覆盖工具结果；被缩句的思考原文没有独立备份）。
 
 ## License
 

@@ -2,7 +2,7 @@
 
 把 DeepSeek Harness（DSH）历史轮次里的**思考链**压成一段第一人称摘录卡片，工具调用与工具结果原文照抄。
 
-> 状态：插件已成型、离线测试通过，**尚未在真实 profile 里跑通**。见 [还没做完的](#还没做完的)。
+> 状态：插件已成型、离线测试通过、装配链路已在 headless profile 验证；**尚未在真实会话里跑出过一次切刀**。骨架已对齐上游 v1.1.4（含 issue #34 的长会话冻结修复）。见 [还没做完的](#还没做完的)。
 
 ---
 
@@ -62,7 +62,7 @@ dsh plugin --profile headless add ./plugin
 ```
 plugin/
   shell.js          薄入口：加载失败也不能把宿主拖死
-  engine.js         引擎：fork 自 dsh-live-compact，改了选段/卡片/摘要三处
+  engine.js         引擎：fork 自 dsh-live-compact v1.1.4，改了选段/卡片/摘要三处
   reasoning.js      本项目的实质内容：选段、卡片渲染、提示词装载、摘要校验
   prompt.txt        缩句提示词（与 bench 定版逐字节一致）
   plan.js shadow.js raw.js    沿用上游：工具结果摘录、shadow 备份、原文捕获
@@ -73,7 +73,7 @@ bench/
   steps.py score.py 任务读取与验收评分（纯标准库，与实现语言无关）
   samples/          真实思考样本 + 定版提示词
 outputs/
-  ab-5round-report.md  5 轮 A/B 实测报告（代理时代的数据，结论仍然有效）
+  ab-5round-report.md  5 轮 A/B 报告（**代理时代归档**，只对提示词风格有参考价值）
 ```
 
 ## 实测
@@ -94,7 +94,8 @@ outputs/
 
 ## 还没做完的
 
-- **没在真实 profile 里跑通**。`shell.js` 的加载链路（含 peer 依赖解析）未验证，`compaction/summary` 事件是否真落进会话日志未验证。
+- **没在真实会话里跑出过一次切刀**。装配链路（`dsh --dump-config` 看到 disable + insert、`__probe.mjs` 加载成功）已验证，但 `compaction/summary` 事件是否真落进会话日志未验证。
+- **摘要路由要显式配置**。官方 `summarizationProvider` / `summarizationModel` 默认为空串；插件现在按「显式配置 → 最近一次请求的模型 → agent 选项」三级兜底，仍未在真实路由下验证过。
 - **shadow 备份没接进切段路径**。当前只沿用上游对工具结果的 raw 捕获，被缩句的思考原文还没做独立备份。
 - **`plan.js` 里约 1100 行工具结果摘录启发式现在用不到**，删之前要先确认 `shadowSections` 等被复用的导出。
 - **压测脚本要重写**。`bench/runner.py` 是围着代理写的，已删；30 轮全量需要新的 runner 走「装插件 → 跑 DSH → 读会话日志」。
@@ -103,7 +104,7 @@ outputs/
 
 ## 致谢
 
-骨架 fork 自 [MerkyorLynn/dsh-live-compact](https://github.com/MerkyorLynn/dsh-live-compact)（MIT，见 [`plugin/LICENSE.upstream`](plugin/LICENSE.upstream)）：切段、shadow 备份、`surfaceOp: replace` 卡片遮盖、commit 前的一整套校验都是它的。本项目把同一套机制从**工具结果**迁移到**思考链**，差别在于思考链走模型缩句而不是规则截断，并且默认不碰工具。
+骨架 fork 自 [MerkyorLynn/dsh-live-compact](https://github.com/MerkyorLynn/dsh-live-compact)（MIT，见 [`plugin/LICENSE.upstream`](plugin/LICENSE.upstream)），并已跟进其 v1.1.4 的 `defer large catch-up after turn end` 修复（[issue #34](https://github.com/Tranquillitatis-Lab/dsh-live-compact/issues/34)）：切段、shadow 备份、`surfaceOp: replace` 卡片遮盖、commit 前的一整套校验都是它的。本项目把同一套机制从**工具结果**迁移到**思考链**，差别在于思考链走模型缩句而不是规则截断，并且默认不碰工具。
 
 设计过程中参考过 [T-Auto/dsh-ops](https://github.com/T-Auto/dsh-ops) 的工具链。
 
